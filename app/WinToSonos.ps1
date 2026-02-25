@@ -26,6 +26,44 @@ function Open-DefaultBrowser {
     Start-Process $Url | Out-Null
 }
 
+function Get-StartupShortcutPath {
+    $startupDir = [Environment]::GetFolderPath('Startup')
+    return (Join-Path $startupDir 'WinToSonos.lnk')
+}
+
+function Test-StartAtLoginEnabled {
+    $startupShortcut = Get-StartupShortcutPath
+    return (Test-Path $startupShortcut)
+}
+
+function Set-StartAtLogin {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    $startupShortcut = Get-StartupShortcutPath
+    $starterScript = Join-Path $PSScriptRoot '..\scripts\start-wintosonos.ps1'
+
+    if (-not (Test-Path $starterScript)) {
+        throw "Starter script not found at '$starterScript'."
+    }
+
+    if ($Enabled) {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($startupShortcut)
+        $shortcut.TargetPath = 'powershell.exe'
+        $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+        $shortcut.Description = 'WinToSonos'
+        $shortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+        $shortcut.Save()
+        Write-AppLog 'Start at login enabled.'
+    }
+    else {
+        if (Test-Path $startupShortcut) {
+            Remove-Item -Path $startupShortcut -Force
+        }
+        Write-AppLog 'Start at login disabled.'
+    }
+}
+
 $notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
 $notifyIcon.Icon = [System.Drawing.SystemIcons]::Speaker
 $notifyIcon.Text = 'WinToSonos'
@@ -35,6 +73,9 @@ $contextMenu = [System.Windows.Forms.ContextMenuStrip]::new()
 
 $openSonosItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Sonos Web')
 $openLogItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Log Folder')
+$startupToggleItem = [System.Windows.Forms.ToolStripMenuItem]::new('Run at startup')
+$startupToggleItem.CheckOnClick = $true
+$startupToggleItem.Checked = Test-StartAtLoginEnabled
 $aboutItem = [System.Windows.Forms.ToolStripMenuItem]::new('About')
 $exitItem = [System.Windows.Forms.ToolStripMenuItem]::new('Exit')
 
@@ -46,6 +87,29 @@ $openSonosItem.Add_Click({
 $openLogItem.Add_Click({
     Write-AppLog 'Opening log folder.'
     Start-Process (Split-Path -Path $LogFile -Parent) | Out-Null
+})
+
+$startupToggleItem.Add_Click({
+    try {
+        Set-StartAtLogin -Enabled $startupToggleItem.Checked
+        if ($startupToggleItem.Checked) {
+            $notifyIcon.BalloonTipText = 'WinToSonos will now run at startup.'
+        }
+        else {
+            $notifyIcon.BalloonTipText = 'WinToSonos startup launch has been disabled.'
+        }
+        $notifyIcon.ShowBalloonTip(2000)
+    }
+    catch {
+        Write-AppLog "Failed to update startup setting: $($_.Exception.Message)"
+        $startupToggleItem.Checked = Test-StartAtLoginEnabled
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not update startup setting.`n`n$($_.Exception.Message)",
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
 })
 
 $aboutItem.Add_Click({
@@ -65,6 +129,7 @@ $exitItem.Add_Click({
 
 [void]$contextMenu.Items.Add($openSonosItem)
 [void]$contextMenu.Items.Add($openLogItem)
+[void]$contextMenu.Items.Add($startupToggleItem)
 [void]$contextMenu.Items.Add($aboutItem)
 [void]$contextMenu.Items.Add('-')
 [void]$contextMenu.Items.Add($exitItem)

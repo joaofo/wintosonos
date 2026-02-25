@@ -8,6 +8,8 @@ WinToSonos is now a **self-contained Windows PowerShell solution** that runs as 
 iwr https://raw.githubusercontent.com/joaofo/wintosonos/main/scripts/install-wintosonos.ps1 -UseBasicParsing | iex
 ```
 
+The default one-liner installs WinToSonos, creates a Start menu shortcut, and launches the tray app immediately.
+
 ## What this solution now provides
 
 - No Python runtime required.
@@ -15,13 +17,15 @@ iwr https://raw.githubusercontent.com/joaofo/wintosonos/main/scripts/install-win
 - Speaker-style icon and menu with:
   - Open Sonos Web
   - Open log folder
+  - Run at startup (toggle)
   - About
   - Exit
 - Installer that downloads the repository zip directly from GitHub.
+- Installer output that confirms WinToSonos is available in the Start menu.
 
 ## Common install examples
 
-Install to the default folder:
+Install to the default folder (also launches WinToSonos):
 
 ```powershell
 .\scripts\install-wintosonos.ps1
@@ -33,10 +37,16 @@ Install and create desktop shortcut:
 .\scripts\install-wintosonos.ps1 -CreateDesktopShortcut
 ```
 
-Install, auto-start on user login, and launch immediately:
+Install and auto-start on user login:
 
 ```powershell
-.\scripts\install-wintosonos.ps1 -StartAtLogin -LaunchAfterInstall
+.\scripts\install-wintosonos.ps1 -StartAtLogin
+```
+
+Install without launching after setup:
+
+```powershell
+.\scripts\install-wintosonos.ps1 -SkipLaunchAfterInstall
 ```
 
 Install to a custom path:
@@ -44,6 +54,28 @@ Install to a custom path:
 ```powershell
 .\scripts\install-wintosonos.ps1 -InstallDir "C:\Tools\WinToSonos"
 ```
+
+## If script execution is disabled
+
+If your system blocks scripts, PowerShell may show an error like:
+
+```text
+WinToSonos.ps1 cannot be loaded because running scripts is disabled on this system.
+```
+
+The installer fails fast with instructions. To enable scripts for your user:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+Then run the installer again.
+
+For policy details, see: https://go.microsoft.com/fwlink/?LinkID=135170
+
+## Run at startup toggle
+
+From the tray icon menu, use **Run at startup** to enable or disable launching WinToSonos when you sign in.
 
 ## File overview
 
