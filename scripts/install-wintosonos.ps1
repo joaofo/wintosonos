@@ -3,12 +3,31 @@ param(
     [string]$InstallDir = "$env:ProgramFiles\WinToSonos",
     [switch]$CreateDesktopShortcut,
     [switch]$StartAtLogin,
-    [switch]$LaunchAfterInstall,
+    [switch]$SkipLaunchAfterInstall,
     [string]$RepoZipUrl = 'https://codeload.github.com/joaofo/wintosonos/zip/refs/heads/main'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function New-ExecutionPolicyError {
+    $message = @"
+WinToSonos installer cannot continue because script execution is disabled on this system.
+
+To enable scripts for your user account, run:
+    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+Then run the installer again.
+For details, see:
+    https://go.microsoft.com/fwlink/?LinkID=135170
+"@
+    return [System.InvalidOperationException]::new($message)
+}
+
+function Test-ScriptExecutionEnabled {
+    $effectivePolicy = Get-ExecutionPolicy
+    return ($effectivePolicy -ne 'Restricted')
+}
 
 function New-Shortcut {
     param(
@@ -100,6 +119,7 @@ function Install-WinToSonos {
         }
 
         Write-Host "WinToSonos installation completed at: $TargetDir"
+        Write-Host "WinToSonos is available from the Start menu as: Start > WinToSonos > WinToSonos"
     }
     finally {
         if (Test-Path $tempRoot) {
@@ -108,4 +128,8 @@ function Install-WinToSonos {
     }
 }
 
-Install-WinToSonos -TargetDir $InstallDir -ZipUrl $RepoZipUrl -WithDesktopShortcut:$CreateDesktopShortcut -WithStartupShortcut:$StartAtLogin -LaunchNow:$LaunchAfterInstall -WhatIf:$WhatIfPreference
+if (-not (Test-ScriptExecutionEnabled)) {
+    throw (New-ExecutionPolicyError)
+}
+
+Install-WinToSonos -TargetDir $InstallDir -ZipUrl $RepoZipUrl -WithDesktopShortcut:$CreateDesktopShortcut -WithStartupShortcut:$StartAtLogin -LaunchNow:$(-not $SkipLaunchAfterInstall) -WhatIf:$WhatIfPreference
