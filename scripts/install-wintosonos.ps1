@@ -2,58 +2,100 @@
 param(
     [string]$InstallDir = "$env:ProgramFiles\WinToSonos",
     [switch]$CreateDesktopShortcut,
-    [string]$RepoZipUrl = "https://codeload.github.com/joaofo/wintosonos/zip/refs/heads/main"
+    [switch]$StartAtLogin,
+    [switch]$LaunchAfterInstall,
+    [string]$RepoZipUrl = 'https://codeload.github.com/joaofo/wintosonos/zip/refs/heads/main'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function New-Shortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [string]$Arguments,
+        [string]$Description = 'WinToSonos',
+        [string]$IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+    )
+
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($Path)
+    $shortcut.TargetPath = $TargetPath
+    if ($Arguments) {
+        $shortcut.Arguments = $Arguments
+    }
+    $shortcut.Description = $Description
+    $shortcut.IconLocation = $IconLocation
+    $shortcut.Save()
+}
+
 function Install-WinToSonos {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$TargetDir,
-        [Parameter(Mandatory = $true)]
-        [string]$ZipUrl,
-        [switch]$WithDesktopShortcut
+        [Parameter(Mandatory = $true)][string]$TargetDir,
+        [Parameter(Mandatory = $true)][string]$ZipUrl,
+        [switch]$WithDesktopShortcut,
+        [switch]$WithStartupShortcut,
+        [switch]$LaunchNow
     )
 
     $tempRoot = Join-Path $env:TEMP ("wintosonos-" + [guid]::NewGuid().ToString('N'))
-    $zipPath = Join-Path $tempRoot "wintosonos.zip"
-    $extractPath = Join-Path $tempRoot "extract"
+    $zipPath = Join-Path $tempRoot 'wintosonos.zip'
+    $extractPath = Join-Path $tempRoot 'extract'
 
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
     try {
-        if ($PSCmdlet.ShouldProcess($ZipUrl, "Download WinToSonos package")) {
+        if ($PSCmdlet.ShouldProcess($ZipUrl, 'Download WinToSonos package')) {
             Invoke-WebRequest -Uri $ZipUrl -OutFile $zipPath -UseBasicParsing
         }
 
-        if ($PSCmdlet.ShouldProcess($extractPath, "Expand WinToSonos package")) {
+        if ($PSCmdlet.ShouldProcess($extractPath, 'Expand WinToSonos package')) {
             Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
         }
 
         $repoRoot = Get-ChildItem -Path $extractPath -Directory | Select-Object -First 1
         if (-not $repoRoot) {
-            throw "Unable to locate extracted repository content."
+            throw 'Unable to locate extracted repository content.'
         }
 
-        if ($PSCmdlet.ShouldProcess($TargetDir, "Install WinToSonos files")) {
+        if ($PSCmdlet.ShouldProcess($TargetDir, 'Install WinToSonos files')) {
             New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
             Copy-Item -Path (Join-Path $repoRoot.FullName '*') -Destination $TargetDir -Recurse -Force
         }
 
+        $starterScript = Join-Path $TargetDir 'scripts\start-wintosonos.ps1'
+        if (-not (Test-Path $starterScript)) {
+            throw "Starter script not found at '$starterScript'."
+        }
+
+        $startMenuDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\WinToSonos'
+        $startMenuShortcut = Join-Path $startMenuDir 'WinToSonos.lnk'
+        if ($PSCmdlet.ShouldProcess($startMenuShortcut, 'Create Start Menu shortcut')) {
+            New-Item -Path $startMenuDir -ItemType Directory -Force | Out-Null
+            New-Shortcut -Path $startMenuShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+        }
+
         if ($WithDesktopShortcut) {
-            $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'WinToSonos.url'
-            if ($PSCmdlet.ShouldProcess($shortcutPath, "Create desktop shortcut")) {
-                $shortcutContent = @(
-                    '[InternetShortcut]'
-                    "URL=file:///$($TargetDir -replace '\\','/')/README.md"
-                    'IconFile=%SystemRoot%\System32\shell32.dll'
-                    'IconIndex=220'
-                )
-                Set-Content -Path $shortcutPath -Value $shortcutContent -Encoding ASCII
+            $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'WinToSonos.lnk'
+            if ($PSCmdlet.ShouldProcess($desktopShortcut, 'Create desktop shortcut')) {
+                New-Shortcut -Path $desktopShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+            }
+        }
+
+        if ($WithStartupShortcut) {
+            $startupDir = [Environment]::GetFolderPath('Startup')
+            $startupShortcut = Join-Path $startupDir 'WinToSonos.lnk'
+            if ($PSCmdlet.ShouldProcess($startupShortcut, 'Create Startup shortcut')) {
+                New-Shortcut -Path $startupShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+            }
+        }
+
+        if ($LaunchNow) {
+            if ($PSCmdlet.ShouldProcess('WinToSonos', 'Launch taskbar app')) {
+                & $starterScript -InstallDir $TargetDir
             }
         }
 
@@ -66,4 +108,4 @@ function Install-WinToSonos {
     }
 }
 
-Install-WinToSonos -TargetDir $InstallDir -ZipUrl $RepoZipUrl -WithDesktopShortcut:$CreateDesktopShortcut -WhatIf:$WhatIfPreference
+Install-WinToSonos -TargetDir $InstallDir -ZipUrl $RepoZipUrl -WithDesktopShortcut:$CreateDesktopShortcut -WithStartupShortcut:$StartAtLogin -LaunchNow:$LaunchAfterInstall -WhatIf:$WhatIfPreference
