@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = "$env:ProgramFiles\WinToSonos"
+    [string]$InstallDir = "$env:ProgramFiles\WinToSonos",
+    [switch]$DebugMode
 )
 
 Set-StrictMode -Version Latest
@@ -15,8 +16,21 @@ $argList = @(
     '-NoLogo'
     '-NoProfile'
     '-ExecutionPolicy', 'Bypass'
-    '-WindowStyle', 'Hidden'
     '-File', ('"{0}"' -f $appScript)
 )
 
-Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden | Out-Null
+if (-not $DebugMode) {
+    $argList = @(
+        '-NoLogo'
+        '-NoProfile'
+        '-ExecutionPolicy', 'Bypass'
+        '-WindowStyle', 'Hidden'
+        '-File', ('"{0}"' -f $appScript)
+    )
+
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden | Out-Null
+    return
+}
+
+Write-Host 'DebugMode enabled: launching app in foreground PowerShell process.'
+& powershell.exe @argList
