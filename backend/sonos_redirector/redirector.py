@@ -11,6 +11,7 @@ import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
@@ -80,18 +81,50 @@ class StreamHandler(BaseHTTPRequestHandler):
         return fake_file.getvalue()
 
 
-def send_soap(endpoint: str, action: str, payload: str) -> None:
-    req = Request(
-        endpoint,
-        method="POST",
-        data=payload.encode("utf-8"),
-        headers={
-            "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPACTION": f'"urn:schemas-upnp-org:service:AVTransport:1#{action}"',
-        },
-    )
-    with urlopen(req, timeout=6):
-        return
+def is_retryable_soap_error(error: Exception) -> bool:
+    if isinstance(error, HTTPError):
+        return error.code >= 500 or error.code == 429
+    return isinstance(error, (URLError, TimeoutError, ConnectionResetError, socket.timeout))
+
+
+def send_soap(
+    endpoint: str,
+    action: str,
+    payload: str,
+    *,
+    timeout_s: float = 6.0,
+    retries: int = 2,
+    retry_delay_s: float = 0.35,
+) -> None:
+    max_attempts = max(1, int(retries) + 1)
+    retry_delay_s = max(0.0, retry_delay_s)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        req = Request(
+            endpoint,
+            method="POST",
+            data=payload.encode("utf-8"),
+            headers={
+                "Content-Type": 'text/xml; charset="utf-8"',
+                "SOAPACTION": f'"urn:schemas-upnp-org:service:AVTransport:1#{action}"',
+            },
+        )
+
+        try:
+            with urlopen(req, timeout=timeout_s):
+                return
+        except Exception as exc:
+            last_error = exc
+            should_retry = attempt < max_attempts and is_retryable_soap_error(exc)
+            if not should_retry:
+                break
+            time.sleep(retry_delay_s * attempt)
+
+    raise RuntimeError(
+        f"Sonos SOAP action '{action}' failed for endpoint {endpoint} "
+        f"after {max_attempts} attempt(s): {last_error}"
+    ) from last_error
 
 
 def fetch_av_transport_endpoint(speaker_ip: str) -> str:
@@ -240,8 +273,22 @@ def run_start(args: argparse.Namespace) -> int:
     endpoint = fetch_av_transport_endpoint(args.speaker_ip)
     metadata = build_didl_metadata(stream_url, args.title)
 
-    send_soap(endpoint, "SetAVTransportURI", build_set_av_transport_uri_envelope(stream_url, metadata))
-    send_soap(endpoint, "Play", build_play_envelope())
+    send_soap(
+        endpoint,
+        "SetAVTransportURI",
+        build_set_av_transport_uri_envelope(stream_url, metadata),
+        timeout_s=args.soap_timeout,
+        retries=args.soap_retries,
+        retry_delay_s=args.soap_retry_delay,
+    )
+    send_soap(
+        endpoint,
+        "Play",
+        build_play_envelope(),
+        timeout_s=args.soap_timeout,
+        retries=args.soap_retries,
+        retry_delay_s=args.soap_retry_delay,
+    )
 
     write_state_file(
         args.state_file,
@@ -266,7 +313,14 @@ def run_start(args: argparse.Namespace) -> int:
             pass
     finally:
         try:
-            send_soap(endpoint, "Stop", build_stop_envelope())
+            send_soap(
+                endpoint,
+                "Stop",
+                build_stop_envelope(),
+                timeout_s=args.soap_timeout,
+                retries=args.soap_retries,
+                retry_delay_s=args.soap_retry_delay,
+            )
         except Exception:
             pass
         server.shutdown()
@@ -293,7 +347,14 @@ def run_stop(args: argparse.Namespace) -> int:
     if endpoint is None:
         endpoint = fetch_av_transport_endpoint(str(speaker_ip))
 
-    send_soap(endpoint, "Stop", build_stop_envelope())
+    send_soap(
+        endpoint,
+        "Stop",
+        build_stop_envelope(),
+        timeout_s=args.soap_timeout,
+        retries=args.soap_retries,
+        retry_delay_s=args.soap_retry_delay,
+    )
     print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'}")
 
     if not args.keep_state:
@@ -317,11 +378,27 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--port", type=int, default=8090, help="HTTP stream port")
     start.add_argument("--stream-path", default="/stream", help="HTTP stream path")
     start.add_argument("--title", default="Windows Audio", help="Displayed stream title")
+    start.add_argument("--soap-timeout", type=float, default=6.0, help="Sonos SOAP HTTP timeout in seconds")
+    start.add_argument("--soap-retries", type=int, default=2, help="Retry count for transient Sonos SOAP failures")
+    start.add_argument(
+        "--soap-retry-delay",
+        type=float,
+        default=0.35,
+        help="Base delay in seconds between Sonos SOAP retries",
+    )
     start.add_argument("--state-file", default=default_state_file(), help="Path to runtime state JSON file")
     start.set_defaults(func=run_start)
 
     stop = subparsers.add_parser("stop", help="Send stop command to the active Sonos stream")
     stop.add_argument("--speaker-ip", default=None, help="Speaker IP (optional when state file exists)")
+    stop.add_argument("--soap-timeout", type=float, default=6.0, help="Sonos SOAP HTTP timeout in seconds")
+    stop.add_argument("--soap-retries", type=int, default=2, help="Retry count for transient Sonos SOAP failures")
+    stop.add_argument(
+        "--soap-retry-delay",
+        type=float,
+        default=0.35,
+        help="Base delay in seconds between Sonos SOAP retries",
+    )
     stop.add_argument("--state-file", default=default_state_file(), help="Path to runtime state JSON file")
     stop.add_argument("--keep-state", action="store_true", help="Do not remove state file after stop")
     stop.set_defaults(func=run_stop)
