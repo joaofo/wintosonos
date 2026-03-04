@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$InstallDir = "$env:ProgramFiles\WinToSonos",
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\WinToSonos",
     [switch]$CreateDesktopShortcut,
     [switch]$StartAtLogin,
     [switch]$SkipLaunchAfterInstall,
@@ -49,6 +49,15 @@ function New-Shortcut {
     $shortcut.Save()
 }
 
+function New-StarterScriptArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$StarterScript,
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    return ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`" -InstallDir `"{1}`"" -f $StarterScript, $InstallDir)
+}
+
 function Install-WinToSonos {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -90,17 +99,19 @@ function Install-WinToSonos {
             throw "Starter script not found at '$starterScript'."
         }
 
+        $starterArguments = New-StarterScriptArguments -StarterScript $starterScript -InstallDir $TargetDir
+
         $startMenuDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\WinToSonos'
         $startMenuShortcut = Join-Path $startMenuDir 'WinToSonos.lnk'
         if ($PSCmdlet.ShouldProcess($startMenuShortcut, 'Create Start Menu shortcut')) {
             New-Item -Path $startMenuDir -ItemType Directory -Force | Out-Null
-            New-Shortcut -Path $startMenuShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+            New-Shortcut -Path $startMenuShortcut -TargetPath 'powershell.exe' -Arguments $starterArguments
         }
 
         if ($WithDesktopShortcut) {
             $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'WinToSonos.lnk'
             if ($PSCmdlet.ShouldProcess($desktopShortcut, 'Create desktop shortcut')) {
-                New-Shortcut -Path $desktopShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+                New-Shortcut -Path $desktopShortcut -TargetPath 'powershell.exe' -Arguments $starterArguments
             }
         }
 
@@ -108,7 +119,7 @@ function Install-WinToSonos {
             $startupDir = [Environment]::GetFolderPath('Startup')
             $startupShortcut = Join-Path $startupDir 'WinToSonos.lnk'
             if ($PSCmdlet.ShouldProcess($startupShortcut, 'Create Startup shortcut')) {
-                New-Shortcut -Path $startupShortcut -TargetPath 'powershell.exe' -Arguments "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+                New-Shortcut -Path $startupShortcut -TargetPath 'powershell.exe' -Arguments $starterArguments
             }
         }
 

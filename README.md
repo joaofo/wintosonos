@@ -25,10 +25,16 @@ The default one-liner installs WinToSonos, creates a Start menu shortcut, and la
 
 ## Common install examples
 
-Install to the default folder (also launches WinToSonos):
+Install to the default per-user folder (also launches WinToSonos):
 
 ```powershell
 .\scripts\install-wintosonos.ps1
+```
+
+Default install path:
+
+```text
+%LOCALAPPDATA%\Programs\WinToSonos
 ```
 
 Install and create desktop shortcut:
@@ -53,6 +59,12 @@ Install to a custom path:
 
 ```powershell
 .\scripts\install-wintosonos.ps1 -InstallDir "C:\Tools\WinToSonos"
+```
+
+Install under Program Files (run PowerShell as Administrator):
+
+```powershell
+.\scripts\install-wintosonos.ps1 -InstallDir "$env:ProgramFiles\WinToSonos"
 ```
 
 ## If script execution is disabled

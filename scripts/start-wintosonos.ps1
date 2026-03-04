@@ -1,10 +1,14 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = "$env:ProgramFiles\WinToSonos"
+    [string]$InstallDir
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    $InstallDir = Split-Path -Path $PSScriptRoot -Parent
+}
 
 $appScript = Join-Path $InstallDir 'app\WinToSonos.ps1'
 if (-not (Test-Path $appScript)) {
@@ -16,7 +20,7 @@ $argList = @(
     '-NoProfile'
     '-ExecutionPolicy', 'Bypass'
     '-WindowStyle', 'Hidden'
-    '-File', ('"{0}"' -f $appScript)
+    '-File', $appScript
 )
 
 Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden | Out-Null

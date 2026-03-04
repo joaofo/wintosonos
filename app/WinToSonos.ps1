@@ -26,6 +26,24 @@ function Open-DefaultBrowser {
     Start-Process $Url | Out-Null
 }
 
+function Get-InstallRoot {
+    return (Split-Path -Path $PSScriptRoot -Parent)
+}
+
+function Get-StarterScriptPath {
+    $installRoot = Get-InstallRoot
+    return (Join-Path $installRoot 'scripts\start-wintosonos.ps1')
+}
+
+function New-StarterScriptArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$StarterScript,
+        [Parameter(Mandatory = $true)][string]$InstallDir
+    )
+
+    return ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`" -InstallDir `"{1}`"" -f $StarterScript, $InstallDir)
+}
+
 function Get-StartupShortcutPath {
     $startupDir = [Environment]::GetFolderPath('Startup')
     return (Join-Path $startupDir 'WinToSonos.lnk')
@@ -40,7 +58,8 @@ function Set-StartAtLogin {
     param([Parameter(Mandatory = $true)][bool]$Enabled)
 
     $startupShortcut = Get-StartupShortcutPath
-    $starterScript = Join-Path $PSScriptRoot '..\scripts\start-wintosonos.ps1'
+    $starterScript = Get-StarterScriptPath
+    $installRoot = Get-InstallRoot
 
     if (-not (Test-Path $starterScript)) {
         throw "Starter script not found at '$starterScript'."
@@ -50,7 +69,7 @@ function Set-StartAtLogin {
         $shell = New-Object -ComObject WScript.Shell
         $shortcut = $shell.CreateShortcut($startupShortcut)
         $shortcut.TargetPath = 'powershell.exe'
-        $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$starterScript`""
+        $shortcut.Arguments = New-StarterScriptArguments -StarterScript $starterScript -InstallDir $installRoot
         $shortcut.Description = 'WinToSonos'
         $shortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
         $shortcut.Save()
@@ -64,8 +83,28 @@ function Set-StartAtLogin {
     }
 }
 
+function Get-NotifyIcon {
+    $sndVolIconPath = Join-Path $env:SystemRoot 'System32\SndVol.exe'
+
+    try {
+        if (Test-Path $sndVolIconPath) {
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($sndVolIconPath)
+            if ($null -ne $icon) {
+                Write-AppLog "Using icon from '$sndVolIconPath'."
+                return $icon
+            }
+        }
+    }
+    catch {
+        Write-AppLog "Failed to load icon from '$sndVolIconPath': $($_.Exception.Message)"
+    }
+
+    Write-AppLog 'Using fallback application icon.'
+    return [System.Drawing.SystemIcons]::Application
+}
+
 $notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
-$notifyIcon.Icon = [System.Drawing.SystemIcons]::Speaker
+$notifyIcon.Icon = Get-NotifyIcon
 $notifyIcon.Text = 'WinToSonos'
 $notifyIcon.Visible = $true
 
