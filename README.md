@@ -60,6 +60,8 @@ You can also run directly:
 
 ## Installer examples
 
+The installer now removes previous WinToSonos installs before copying the new version (including legacy paths such as `%ProgramFiles%\WinToSonos`).
+
 Install to default per-user location and launch app:
 
 ```powershell

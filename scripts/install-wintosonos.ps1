@@ -58,6 +58,74 @@ function New-StarterScriptArguments {
     return ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`" -InstallDir `"{1}`"" -f $StarterScript, $InstallDir)
 }
 
+function Normalize-InstallPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $trimmed = $Path.Trim().TrimEnd('\', '/')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return ''
+    }
+
+    return [System.IO.Path]::GetFullPath($trimmed).TrimEnd('\\')
+}
+
+function Remove-ExistingInstall {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess($Path, 'Remove previous WinToSonos installation')) {
+        try {
+            Remove-Item -Path $Path -Recurse -Force
+            Write-Host "Removed previous installation at: $Path"
+        }
+        catch {
+            throw "Unable to remove existing installation at '$Path'. Close running WinToSonos apps and retry. $($_.Exception.Message)"
+        }
+    }
+}
+
+function Get-PreviousInstallPaths {
+    param([Parameter(Mandatory = $true)][string]$TargetDir)
+
+    $candidatePaths = @(
+        "$env:LOCALAPPDATA\Programs\WinToSonos",
+        "$env:ProgramFiles\WinToSonos",
+        "$env:ProgramData\WinToSonos"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $candidatePaths += "${env:ProgramFiles(x86)}\WinToSonos"
+    }
+
+    $normalizedTarget = Normalize-InstallPath -Path $TargetDir
+
+    $results = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $candidatePaths) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        $normalizedCandidate = Normalize-InstallPath -Path $candidate
+        if ([string]::IsNullOrWhiteSpace($normalizedCandidate)) {
+            continue
+        }
+
+        if ($normalizedCandidate -ieq $normalizedTarget) {
+            continue
+        }
+
+        if (-not $results.Contains($candidate)) {
+            $results.Add($candidate)
+        }
+    }
+
+    return $results
+}
+
 function Install-WinToSonos {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -88,6 +156,13 @@ function Install-WinToSonos {
         if (-not $repoRoot) {
             throw 'Unable to locate extracted repository content.'
         }
+
+        $previousInstallPaths = Get-PreviousInstallPaths -TargetDir $TargetDir
+        foreach ($previousInstallPath in $previousInstallPaths) {
+            Remove-ExistingInstall -Path $previousInstallPath -WhatIf:$WhatIfPreference
+        }
+
+        Remove-ExistingInstall -Path $TargetDir -WhatIf:$WhatIfPreference
 
         if ($PSCmdlet.ShouldProcess($TargetDir, 'Install WinToSonos files')) {
             New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
