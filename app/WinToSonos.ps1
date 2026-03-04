@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 $logDir = Split-Path -Path $LogFile -Parent
 if ($logDir -and -not (Test-Path $logDir)) {
@@ -42,6 +43,110 @@ function New-StarterScriptArguments {
     )
 
     return ("-NoProfile -ExecutionPolicy Bypass -File `"{0}`" -InstallDir `"{1}`"" -f $StarterScript, $InstallDir)
+}
+
+function Get-AppDataRoot {
+    $appDataRoot = Join-Path $env:LOCALAPPDATA 'WinToSonos'
+    if (-not (Test-Path $appDataRoot)) {
+        New-Item -Path $appDataRoot -ItemType Directory -Force | Out-Null
+    }
+    return $appDataRoot
+}
+
+function Get-SettingsFilePath {
+    $appDataRoot = Get-AppDataRoot
+    return (Join-Path $appDataRoot 'settings.json')
+}
+
+function Get-ConfiguredSpeakerIp {
+    $settingsPath = Get-SettingsFilePath
+    if (-not (Test-Path $settingsPath)) {
+        return ''
+    }
+
+    try {
+        $settings = Get-Content -Path $settingsPath -Raw | ConvertFrom-Json
+        if ($settings.speaker_ip) {
+            return [string]$settings.speaker_ip
+        }
+    }
+    catch {
+        Write-AppLog "Failed to parse settings file '$settingsPath': $($_.Exception.Message)"
+    }
+
+    return ''
+}
+
+function Set-ConfiguredSpeakerIp {
+    param([Parameter(Mandatory = $true)][string]$SpeakerIp)
+
+    $settingsPath = Get-SettingsFilePath
+    $settings = [ordered]@{
+        speaker_ip = $SpeakerIp
+        last_updated_utc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    $settings | ConvertTo-Json | Set-Content -Path $settingsPath -Encoding UTF8
+}
+
+function Prompt-SpeakerIp {
+    $currentValue = Get-ConfiguredSpeakerIp
+    return [Microsoft.VisualBasic.Interaction]::InputBox(
+        'Enter the Sonos speaker IP address to use for audio redirection.',
+        'WinToSonos Speaker',
+        $currentValue
+    )
+}
+
+function Get-StartRedirectScriptPath {
+    $installRoot = Get-InstallRoot
+    return (Join-Path $installRoot 'scripts\start-audio-redirect.ps1')
+}
+
+function Get-StopRedirectScriptPath {
+    $installRoot = Get-InstallRoot
+    return (Join-Path $installRoot 'scripts\stop-audio-redirect.ps1')
+}
+
+function Start-AudioRedirect {
+    $startScript = Get-StartRedirectScriptPath
+    if (-not (Test-Path $startScript)) {
+        throw "Audio redirect start script not found at '$startScript'."
+    }
+
+    $speakerIp = Get-ConfiguredSpeakerIp
+    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
+        $speakerIp = Prompt-SpeakerIp
+    }
+
+    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
+        Write-AppLog 'Audio redirect start cancelled (no speaker IP selected).'
+        return
+    }
+
+    Set-ConfiguredSpeakerIp -SpeakerIp $speakerIp
+
+    $installRoot = Get-InstallRoot
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`" -InstallDir `"$installRoot`" -SpeakerIp `"$speakerIp`""
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+
+    Write-AppLog "Audio redirect start requested for speaker $speakerIp."
+    $notifyIcon.BalloonTipText = "Starting audio redirection to $speakerIp."
+    $notifyIcon.ShowBalloonTip(2500)
+}
+
+function Stop-AudioRedirect {
+    $stopScript = Get-StopRedirectScriptPath
+    if (-not (Test-Path $stopScript)) {
+        throw "Audio redirect stop script not found at '$stopScript'."
+    }
+
+    $installRoot = Get-InstallRoot
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$stopScript`" -InstallDir `"$installRoot`""
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden | Out-Null
+
+    Write-AppLog 'Audio redirect stop requested.'
+    $notifyIcon.BalloonTipText = 'Stopping audio redirection.'
+    $notifyIcon.ShowBalloonTip(2500)
 }
 
 function Get-StartupShortcutPath {
@@ -112,6 +217,9 @@ $contextMenu = [System.Windows.Forms.ContextMenuStrip]::new()
 
 $openSonosItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Sonos Web')
 $openLogItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Log Folder')
+$selectSpeakerItem = [System.Windows.Forms.ToolStripMenuItem]::new('Select speaker...')
+$startRedirectItem = [System.Windows.Forms.ToolStripMenuItem]::new('Start audio redirect')
+$stopRedirectItem = [System.Windows.Forms.ToolStripMenuItem]::new('Stop audio redirect')
 $startupToggleItem = [System.Windows.Forms.ToolStripMenuItem]::new('Run at startup')
 $startupToggleItem.CheckOnClick = $true
 $startupToggleItem.Checked = Test-StartAtLoginEnabled
@@ -126,6 +234,51 @@ $openSonosItem.Add_Click({
 $openLogItem.Add_Click({
     Write-AppLog 'Opening log folder.'
     Start-Process (Split-Path -Path $LogFile -Parent) | Out-Null
+})
+
+$selectSpeakerItem.Add_Click({
+    try {
+        $speakerIp = Prompt-SpeakerIp
+        if (-not [string]::IsNullOrWhiteSpace($speakerIp)) {
+            Set-ConfiguredSpeakerIp -SpeakerIp $speakerIp
+            Write-AppLog "Speaker selection updated to $speakerIp."
+            $notifyIcon.BalloonTipText = "Speaker set to $speakerIp."
+            $notifyIcon.ShowBalloonTip(2000)
+        }
+    }
+    catch {
+        Write-AppLog "Failed to set speaker selection: $($_.Exception.Message)"
+    }
+})
+
+$startRedirectItem.Add_Click({
+    try {
+        Start-AudioRedirect
+    }
+    catch {
+        Write-AppLog "Failed to start audio redirect: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not start audio redirect.`n`n$($_.Exception.Message)",
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+})
+
+$stopRedirectItem.Add_Click({
+    try {
+        Stop-AudioRedirect
+    }
+    catch {
+        Write-AppLog "Failed to stop audio redirect: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not stop audio redirect.`n`n$($_.Exception.Message)",
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
 })
 
 $startupToggleItem.Add_Click({
@@ -152,8 +305,13 @@ $startupToggleItem.Add_Click({
 })
 
 $aboutItem.Add_Click({
+    $speakerIp = Get-ConfiguredSpeakerIp
+    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
+        $speakerIp = '(not set)'
+    }
+
     [System.Windows.Forms.MessageBox]::Show(
-        "WinToSonos is running in the taskbar notification area.`n`nLog file:`n$LogFile",
+        "WinToSonos redirects Windows output audio to a Sonos speaker on your local network.`n`nCurrent speaker:`n$speakerIp`n`nLog file:`n$LogFile",
         'About WinToSonos',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information
@@ -167,7 +325,11 @@ $exitItem.Add_Click({
 })
 
 [void]$contextMenu.Items.Add($openSonosItem)
+[void]$contextMenu.Items.Add($selectSpeakerItem)
+[void]$contextMenu.Items.Add($startRedirectItem)
+[void]$contextMenu.Items.Add($stopRedirectItem)
 [void]$contextMenu.Items.Add($openLogItem)
+[void]$contextMenu.Items.Add('-')
 [void]$contextMenu.Items.Add($startupToggleItem)
 [void]$contextMenu.Items.Add($aboutItem)
 [void]$contextMenu.Items.Add('-')

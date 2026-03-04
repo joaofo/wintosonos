@@ -1,34 +1,17 @@
 # WinToSonos
 
-WinToSonos is now a **self-contained Windows PowerShell solution** that runs as a tray/taskbar app with a speaker icon.
+WinToSonos redirects Windows system audio to a Sonos speaker you choose on your local network, then lets you stop redirection when you are done.
 
-## Install from GitHub (PowerShell `iwr`)
+## Mission
+
+- Pick a Sonos speaker on your LAN.
+- Redirect current Windows output audio to that speaker.
+- Stop redirection cleanly from the tray app.
+
+## Quick install (PowerShell)
 
 ```powershell
 iwr https://raw.githubusercontent.com/joaofo/wintosonos/main/scripts/install-wintosonos.ps1 -UseBasicParsing | iex
-```
-
-The default one-liner installs WinToSonos, creates a Start menu shortcut, and launches the tray app immediately.
-
-## What this solution now provides
-
-- No Python runtime required.
-- A PowerShell tray app (`app/WinToSonos.ps1`) that appears in the Windows taskbar notification area.
-- Speaker-style icon and menu with:
-  - Open Sonos Web
-  - Open log folder
-  - Run at startup (toggle)
-  - About
-  - Exit
-- Installer that downloads the repository zip directly from GitHub.
-- Installer output that confirms WinToSonos is available in the Start menu.
-
-## Common install examples
-
-Install to the default per-user folder (also launches WinToSonos):
-
-```powershell
-.\scripts\install-wintosonos.ps1
 ```
 
 Default install path:
@@ -37,13 +20,59 @@ Default install path:
 %LOCALAPPDATA%\Programs\WinToSonos
 ```
 
+## Prerequisites
+
+- Windows 10/11
+- Sonos speaker on the same local network
+- Python 3.10+ available on PATH (`py` launcher or `python` command)
+
+WinToSonos creates a local virtual environment on first redirect start and installs runtime dependencies automatically.
+
+## How to use
+
+1. Launch WinToSonos from Start menu.
+2. Click the tray icon.
+3. Use `Select speaker...` and enter your Sonos speaker IP.
+4. Click `Start audio redirect`.
+5. When finished, click `Stop audio redirect`.
+
+### Tray menu actions
+
+- `Select speaker...` saves your preferred speaker IP.
+- `Start audio redirect` starts local audio capture and sends playback to selected Sonos.
+- `Stop audio redirect` stops Sonos playback and terminates local streaming.
+- `Run at startup` toggles launching WinToSonos at Windows sign-in.
+
+## CLI scripts
+
+You can also run directly:
+
+```powershell
+# Start redirect
+.\scripts\start-audio-redirect.ps1 -SpeakerIp 192.168.1.50
+
+# Stop redirect
+.\scripts\stop-audio-redirect.ps1
+
+# Discover Sonos speakers (JSON)
+.\scripts\list-sonos-speakers.ps1
+```
+
+## Installer examples
+
+Install to default per-user location and launch app:
+
+```powershell
+.\scripts\install-wintosonos.ps1
+```
+
 Install and create desktop shortcut:
 
 ```powershell
 .\scripts\install-wintosonos.ps1 -CreateDesktopShortcut
 ```
 
-Install and auto-start on user login:
+Install and auto-start app on login:
 
 ```powershell
 .\scripts\install-wintosonos.ps1 -StartAtLogin
@@ -55,7 +84,7 @@ Install without launching after setup:
 .\scripts\install-wintosonos.ps1 -SkipLaunchAfterInstall
 ```
 
-Install to a custom path:
+Install to custom path:
 
 ```powershell
 .\scripts\install-wintosonos.ps1 -InstallDir "C:\Tools\WinToSonos"
@@ -67,30 +96,41 @@ Install under Program Files (run PowerShell as Administrator):
 .\scripts\install-wintosonos.ps1 -InstallDir "$env:ProgramFiles\WinToSonos"
 ```
 
-## If script execution is disabled
+## Troubleshooting
 
-If your system blocks scripts, PowerShell may show an error like:
+### Python not found
 
-```text
-WinToSonos.ps1 cannot be loaded because running scripts is disabled on this system.
+Install Python 3.10+ and ensure one of these works:
+
+```powershell
+py -3 --version
+# or
+python --version
 ```
 
-The installer fails fast with instructions. To enable scripts for your user:
+### Speaker does not play audio
+
+- Confirm speaker IP is correct.
+- Confirm PC and Sonos are on the same subnet.
+- Allow local firewall inbound access for WinToSonos/Python on the stream port (default 8090).
+- Check logs in `%LOCALAPPDATA%\WinToSonos`:
+  - `wintosonos.log`
+  - `redirector.stdout.log`
+  - `redirector.stderr.log`
+
+### Script execution disabled
+
+If PowerShell blocks scripts:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
-Then run the installer again.
+## Project layout
 
-For policy details, see: https://go.microsoft.com/fwlink/?LinkID=135170
-
-## Run at startup toggle
-
-From the tray icon menu, use **Run at startup** to enable or disable launching WinToSonos when you sign in.
-
-## File overview
-
-- `app/WinToSonos.ps1`: tray/taskbar PowerShell app.
-- `scripts/start-wintosonos.ps1`: starts the app hidden in the background.
-- `scripts/install-wintosonos.ps1`: GitHub-downloading installer and shortcut setup.
+- `app/WinToSonos.ps1`: tray app UI and controls.
+- `scripts/install-wintosonos.ps1`: installer.
+- `scripts/start-wintosonos.ps1`: starts tray app hidden.
+- `scripts/start-audio-redirect.ps1`: starts audio redirection backend.
+- `scripts/stop-audio-redirect.ps1`: stops redirection backend + Sonos playback.
+- `backend/sonos_redirector/`: Python audio redirector engine.

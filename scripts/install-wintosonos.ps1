@@ -101,7 +101,8 @@ function Install-WinToSonos {
 
         $starterArguments = New-StarterScriptArguments -StarterScript $starterScript -InstallDir $TargetDir
 
-        $startMenuDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\WinToSonos'
+        $startMenuProgramsDir = [Environment]::GetFolderPath('Programs')
+        $startMenuDir = Join-Path $startMenuProgramsDir 'WinToSonos'
         $startMenuShortcut = Join-Path $startMenuDir 'WinToSonos.lnk'
         if ($PSCmdlet.ShouldProcess($startMenuShortcut, 'Create Start Menu shortcut')) {
             New-Item -Path $startMenuDir -ItemType Directory -Force | Out-Null
