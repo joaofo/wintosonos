@@ -1,0 +1,43 @@
+name: PowerShell CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  lint-and-parse:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+
+      - name: PowerShell syntax parse check
+        shell: pwsh
+        run: |
+          $errors = @()
+          Get-ChildItem -Path app,scripts -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              $errors += $parseErrors
+            }
+          }
+
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell parse validation failed."
+          }
+
+      - name: Run ScriptAnalyzer
+        shell: pwsh
+        run: |
+          Invoke-ScriptAnalyzer -Path app,scripts -Recurse -EnableExit
