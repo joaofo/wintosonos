@@ -160,6 +160,22 @@ def test_resolve_speaker_selector_accepts_ip_without_discovery() -> None:
     assert calls["count"] == 0
 
 
+def test_resolve_speaker_selector_rejects_non_local_ipv4() -> None:
+    try:
+        redirector.resolve_speaker_selector("8.8.8.8", timeout_s=1.5)
+        assert False, "Expected RuntimeError"
+    except RuntimeError as exc:
+        assert "local-network IPv4" in str(exc)
+
+
+def test_resolve_speaker_selector_rejects_ipv6_address() -> None:
+    try:
+        redirector.resolve_speaker_selector("fd00::abcd", timeout_s=1.5)
+        assert False, "Expected RuntimeError"
+    except RuntimeError as exc:
+        assert "local-network IPv4" in str(exc)
+
+
 def test_resolve_speaker_selector_matches_name_case_insensitive() -> None:
     original_discover_speakers = redirector.discover_speakers
 
@@ -199,6 +215,66 @@ def test_resolve_speaker_selector_raises_for_ambiguous_name() -> None:
             assert "matched multiple speakers" in str(exc)
     finally:
         redirector.discover_speakers = original_discover_speakers
+
+
+def test_discover_speakers_filters_non_local_addresses() -> None:
+    class DummyResponse:
+        def __init__(self, body: str):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body.encode("utf-8")
+
+    def make_device_xml(name: str) -> str:
+        return (
+            "<?xml version='1.0'?>"
+            "<root xmlns='urn:schemas-upnp-org:device-1-0'>"
+            "<device>"
+            f"<friendlyName>{name}</friendlyName>"
+            "</device>"
+            "</root>"
+        )
+
+    locations = [
+        "http://192.168.1.20:1400/xml/device_description.xml",
+        "http://8.8.8.8:1400/xml/device_description.xml",
+        "http://[fd00::abcd]:1400/xml/device_description.xml",
+        "http://169.254.20.7:1400/xml/device_description.xml",
+    ]
+    xml_by_location = {
+        locations[0]: make_device_xml("Living Room"),
+        locations[1]: make_device_xml("Remote"),
+        locations[2]: make_device_xml("IPv6 Speaker"),
+        locations[3]: make_device_xml("Office"),
+    }
+
+    original_discover_sonos_locations = redirector.discover_sonos_locations
+    original_urlopen = redirector.urlopen
+
+    def fake_discover_sonos_locations(timeout_s):
+        del timeout_s
+        return locations
+
+    def fake_urlopen(location, timeout):
+        del timeout
+        return DummyResponse(xml_by_location[location])
+
+    redirector.discover_sonos_locations = fake_discover_sonos_locations
+    redirector.urlopen = fake_urlopen
+    try:
+        speakers = redirector.discover_speakers(timeout_s=1.5)
+    finally:
+        redirector.discover_sonos_locations = original_discover_sonos_locations
+        redirector.urlopen = original_urlopen
+
+    assert [speaker["name"] for speaker in speakers] == ["Living Room", "Office"]
+    assert [speaker["ip"] for speaker in speakers] == ["192.168.1.20", "169.254.20.7"]
 
 
 def test_send_soap_retries_and_succeeds() -> None:

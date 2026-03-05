@@ -32,7 +32,7 @@ WinToSonos creates a local virtual environment on first redirect start and insta
 
 1. Launch WinToSonos from Start menu.
 2. Click the tray icon.
-3. Use `Select speaker...` and enter your Sonos speaker IP.
+3. Use `Select speaker...` and enter your Sonos speaker local-network IPv4 address (for example `192.168.x.x`).
 4. Click `Start audio redirect`.
 5. When finished, click `Stop audio redirect`.
 
@@ -58,7 +58,7 @@ You can also run directly:
 .\scripts\list-sonos-speakers.ps1
 ```
 
-Backend CLI also supports speaker-friendly selection (resolved from discovery):
+Backend CLI also supports speaker-friendly selection (resolved from discovery of local-network Sonos IPv4 speakers):
 
 ```powershell
 # Start by friendly speaker name

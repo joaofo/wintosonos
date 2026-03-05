@@ -172,6 +172,8 @@ def discover_speakers(timeout_s: float) -> list[dict[str, str]]:
                 xml = response.read().decode("utf-8", errors="ignore")
             friendly_name = parse_friendly_name(xml) or "Sonos speaker"
             ip = parse_ip_from_location(location) or ""
+            if not is_private_ipv4_address(ip):
+                continue
             speakers.append(
                 {
                     "name": friendly_name,
@@ -191,6 +193,15 @@ def is_ip_address(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def is_private_ipv4_address(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+
+    return isinstance(ip, ipaddress.IPv4Address) and (ip.is_private or ip.is_link_local)
 
 
 def normalize_speaker_name(value: str) -> str:
@@ -249,6 +260,10 @@ def resolve_speaker_selector(selector: str, timeout_s: float) -> dict[str, str]:
         raise RuntimeError("Speaker selector is empty")
 
     if is_ip_address(normalized_selector):
+        if not is_private_ipv4_address(normalized_selector):
+            raise RuntimeError(
+                f"Speaker selector '{selector}' must be a local-network IPv4 address"
+            )
         return {
             "name": "",
             "ip": normalized_selector,
