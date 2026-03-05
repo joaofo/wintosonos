@@ -24,8 +24,9 @@ Default install path:
 
 - Windows 10/11
 - Sonos speaker on the same local network
-- Python 3.10+ available on PATH (`py` launcher or `python` command)
+- Python 3.10+ available on PATH (`py` launcher or `python` command) for audio redirect runtime bootstrap
 
+`Select speaker...` discovery works locally on LAN even without Python.
 WinToSonos creates a local virtual environment on first redirect start and installs runtime dependencies automatically.
 
 ## How to use
