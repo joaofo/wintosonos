@@ -223,6 +223,21 @@ def stream_url_matches_state(*, current_uri: str, state_stream_url: str) -> bool
     return canonical_current == canonical_state
 
 
+def should_restore_previous_source(*, previous_uri: str, state_stream_url: str) -> bool:
+    normalized_previous_uri = previous_uri.strip()
+    if not normalized_previous_uri:
+        return False
+
+    normalized_state_stream_url = state_stream_url.strip()
+    if normalized_state_stream_url and stream_url_matches_state(
+        current_uri=normalized_previous_uri,
+        state_stream_url=normalized_state_stream_url,
+    ):
+        return False
+
+    return True
+
+
 def format_speaker_choices(speakers: list[dict[str, str]]) -> str:
     labels = [f"{speaker.get('name', 'Sonos speaker')} ({speaker.get('ip', 'unknown')})" for speaker in speakers]
     return ", ".join(sorted(labels))
@@ -634,25 +649,35 @@ def run_stop(args: argparse.Namespace) -> int:
             raise stop_error
 
     restored_previous_source = False
+    skipped_previous_source_restore = False
     restore_error: Exception | None = None
-    if args.restore_previous_source and previous_uri:
-        try:
-            send_soap(
-                endpoint,
-                "SetAVTransportURI",
-                build_set_av_transport_uri_envelope(previous_uri, previous_uri_metadata),
-                timeout_s=args.soap_timeout,
-                retries=args.soap_retries,
-                retry_delay_s=args.soap_retry_delay,
-            )
-            restored_previous_source = True
-        except Exception as exc:
-            restore_error = exc
+    if args.restore_previous_source:
+        if should_restore_previous_source(previous_uri=previous_uri, state_stream_url=state_stream_url):
+            try:
+                send_soap(
+                    endpoint,
+                    "SetAVTransportURI",
+                    build_set_av_transport_uri_envelope(previous_uri, previous_uri_metadata),
+                    timeout_s=args.soap_timeout,
+                    retries=args.soap_retries,
+                    retry_delay_s=args.soap_retry_delay,
+                )
+                restored_previous_source = True
+            except Exception as exc:
+                restore_error = exc
+        elif previous_uri:
+            skipped_previous_source_restore = True
 
     if restored_previous_source:
         print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'} and restored previous source")
     else:
         print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'}")
+
+    if skipped_previous_source_restore:
+        print(
+            "Skipped previous source restore because the saved previous source matches "
+            "the WinToSonos stream"
+        )
 
     if restore_error is not None:
         print(f"Warning: stop succeeded but previous Sonos source restore failed: {restore_error}")

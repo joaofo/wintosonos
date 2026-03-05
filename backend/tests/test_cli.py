@@ -511,6 +511,69 @@ def test_stream_url_matches_state_handles_default_http_port() -> None:
     )
 
 
+def test_should_restore_previous_source_skips_wintosonos_stream() -> None:
+    assert (
+        redirector.should_restore_previous_source(
+            previous_uri="http://192.168.1.11:8090/stream",
+            state_stream_url="http://192.168.1.11:8090/stream",
+        )
+        is False
+    )
+
+
+def test_should_restore_previous_source_allows_non_stream_uri() -> None:
+    assert (
+        redirector.should_restore_previous_source(
+            previous_uri="x-rincon-queue:RINCON_00112233445501400#0",
+            state_stream_url="http://192.168.1.11:8090/stream",
+        )
+        is True
+    )
+
+
+def test_run_stop_skips_restore_when_previous_source_is_wintosonos_stream() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        state_file = f"{temp_dir}/redirect-state.json"
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "speaker_ip": "192.168.1.50",
+                    "endpoint": "http://192.168.1.50:1400/MediaRenderer/AVTransport/Control",
+                    "stream_url": "http://192.168.1.11:8090/stream",
+                    "previous_uri": "http://192.168.1.11:8090/stream",
+                    "previous_uri_metadata": "<DIDL-Lite><dc:title>Windows Audio</dc:title></DIDL-Lite>",
+                },
+                f,
+            )
+
+        parser = build_parser()
+        args = parser.parse_args(["stop", "--state-file", state_file])
+
+        soap_calls = []
+        original_fetch_current_transport_source = redirector.fetch_current_transport_source
+        original_send_soap = redirector.send_soap
+
+        def fake_fetch_current_transport_source(endpoint, **kwargs):
+            del endpoint, kwargs
+            return "http://192.168.1.11:8090/stream", ""
+
+        def fake_send_soap(endpoint, action, payload, **kwargs):
+            soap_calls.append((endpoint, action, payload, kwargs))
+            return None
+
+        redirector.fetch_current_transport_source = fake_fetch_current_transport_source
+        redirector.send_soap = fake_send_soap
+        try:
+            exit_code = redirector.run_stop(args)
+        finally:
+            redirector.fetch_current_transport_source = original_fetch_current_transport_source
+            redirector.send_soap = original_send_soap
+
+        assert exit_code == 0
+        assert [call[1] for call in soap_calls] == ["Stop"]
+        assert not redirector.Path(state_file).exists()
+
+
 def test_run_stop_skips_when_speaker_no_longer_plays_wintosonos_stream() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         state_file = f"{temp_dir}/redirect-state.json"
