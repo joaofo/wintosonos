@@ -23,9 +23,11 @@ from sonos_redirector.discovery import (
 )
 from sonos_redirector.soap import (
     build_didl_metadata,
+    build_get_media_info_envelope,
     build_play_envelope,
     build_set_av_transport_uri_envelope,
     build_stop_envelope,
+    parse_current_transport_uri,
 )
 
 
@@ -95,7 +97,8 @@ def send_soap(
     timeout_s: float = 6.0,
     retries: int = 2,
     retry_delay_s: float = 0.35,
-) -> None:
+    expect_response: bool = False,
+) -> str | None:
     max_attempts = max(1, int(retries) + 1)
     retry_delay_s = max(0.0, retry_delay_s)
     last_error: Exception | None = None
@@ -112,8 +115,10 @@ def send_soap(
         )
 
         try:
-            with urlopen(req, timeout=timeout_s):
-                return
+            with urlopen(req, timeout=timeout_s) as response:
+                if expect_response:
+                    return response.read().decode("utf-8", errors="ignore")
+                return None
         except Exception as exc:
             last_error = exc
             should_retry = attempt < max_attempts and is_retryable_soap_error(exc)
@@ -135,6 +140,27 @@ def fetch_av_transport_endpoint(speaker_ip: str) -> str:
     if not control_path:
         raise RuntimeError("Could not find AVTransport control URL in Sonos device description")
     return urljoin(desc_url, control_path)
+
+
+def fetch_current_transport_source(
+    endpoint: str,
+    *,
+    timeout_s: float = 6.0,
+    retries: int = 2,
+    retry_delay_s: float = 0.35,
+) -> tuple[str, str]:
+    response_xml = send_soap(
+        endpoint,
+        "GetMediaInfo",
+        build_get_media_info_envelope(),
+        timeout_s=timeout_s,
+        retries=retries,
+        retry_delay_s=retry_delay_s,
+        expect_response=True,
+    )
+    if not isinstance(response_xml, str):
+        return "", ""
+    return parse_current_transport_uri(response_xml)
 
 
 def discover_speakers(timeout_s: float) -> list[dict[str, str]]:
@@ -273,6 +299,18 @@ def run_start(args: argparse.Namespace) -> int:
     endpoint = fetch_av_transport_endpoint(args.speaker_ip)
     metadata = build_didl_metadata(stream_url, args.title)
 
+    previous_uri = ""
+    previous_uri_metadata = ""
+    try:
+        previous_uri, previous_uri_metadata = fetch_current_transport_source(
+            endpoint,
+            timeout_s=args.soap_timeout,
+            retries=args.soap_retries,
+            retry_delay_s=args.soap_retry_delay,
+        )
+    except Exception as exc:
+        print(f"Warning: unable to capture previous Sonos source before redirect: {exc}")
+
     send_soap(
         endpoint,
         "SetAVTransportURI",
@@ -300,6 +338,8 @@ def run_start(args: argparse.Namespace) -> int:
             "port": args.port,
             "title": args.title,
             "started_at_epoch": int(time.time()),
+            "previous_uri": previous_uri,
+            "previous_uri_metadata": previous_uri_metadata,
         },
     )
 
@@ -347,6 +387,17 @@ def run_stop(args: argparse.Namespace) -> int:
     if endpoint is None:
         endpoint = fetch_av_transport_endpoint(str(speaker_ip))
 
+    previous_uri = ""
+    previous_uri_metadata = ""
+    if state:
+        previous_uri_value = state.get("previous_uri")
+        if isinstance(previous_uri_value, str):
+            previous_uri = previous_uri_value
+
+        previous_uri_metadata_value = state.get("previous_uri_metadata")
+        if isinstance(previous_uri_metadata_value, str):
+            previous_uri_metadata = previous_uri_metadata_value
+
     send_soap(
         endpoint,
         "Stop",
@@ -355,7 +406,30 @@ def run_stop(args: argparse.Namespace) -> int:
         retries=args.soap_retries,
         retry_delay_s=args.soap_retry_delay,
     )
-    print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'}")
+
+    restored_previous_source = False
+    restore_error: Exception | None = None
+    if args.restore_previous_source and previous_uri:
+        try:
+            send_soap(
+                endpoint,
+                "SetAVTransportURI",
+                build_set_av_transport_uri_envelope(previous_uri, previous_uri_metadata),
+                timeout_s=args.soap_timeout,
+                retries=args.soap_retries,
+                retry_delay_s=args.soap_retry_delay,
+            )
+            restored_previous_source = True
+        except Exception as exc:
+            restore_error = exc
+
+    if restored_previous_source:
+        print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'} and restored previous source")
+    else:
+        print(f"Sent stop command to Sonos speaker {speaker_ip or 'unknown'}")
+
+    if restore_error is not None:
+        print(f"Warning: stop succeeded but previous Sonos source restore failed: {restore_error}")
 
     if not args.keep_state:
         remove_state_file(args.state_file)
@@ -400,8 +474,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Base delay in seconds between Sonos SOAP retries",
     )
     stop.add_argument("--state-file", default=default_state_file(), help="Path to runtime state JSON file")
+    stop.add_argument(
+        "--no-restore-previous-source",
+        dest="restore_previous_source",
+        action="store_false",
+        help="Do not restore the speaker's previous source after stopping redirect",
+    )
     stop.add_argument("--keep-state", action="store_true", help="Do not remove state file after stop")
-    stop.set_defaults(func=run_stop)
+    stop.set_defaults(func=run_stop, restore_previous_source=True)
 
     return parser
 

@@ -40,7 +40,7 @@ WinToSonos creates a local virtual environment on first redirect start and insta
 
 - `Select speaker...` saves your preferred speaker IP.
 - `Start audio redirect` starts local audio capture and sends playback to selected Sonos.
-- `Stop audio redirect` stops Sonos playback and terminates local streaming.
+- `Stop audio redirect` stops Sonos playback, restores the previous Sonos source when available, and terminates local streaming.
 - `Run at startup` toggles launching WinToSonos at Windows sign-in.
 
 ## CLI scripts
