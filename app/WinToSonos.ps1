@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$LogFile = "$env:LOCALAPPDATA\WinToSonos\wintosonos.log",
-    [string]$SonosWebUrl = 'https://play.sonos.com'
+    [string]$LogFile = "$env:LOCALAPPDATA\WinToSonos\wintosonos.log"
 )
 
 Set-StrictMode -Version Latest
@@ -22,11 +21,6 @@ function Write-AppLog {
     Add-Content -Path $LogFile -Value "[$timestamp] $Message"
 }
 
-function Open-DefaultBrowser {
-    param([Parameter(Mandatory = $true)][string]$Url)
-    Start-Process $Url | Out-Null
-}
-
 function Get-InstallRoot {
     return (Split-Path -Path $PSScriptRoot -Parent)
 }
@@ -34,6 +28,11 @@ function Get-InstallRoot {
 function Get-StarterScriptPath {
     $installRoot = Get-InstallRoot
     return (Join-Path $installRoot 'scripts\start-wintosonos.ps1')
+}
+
+function Get-ListSpeakersScriptPath {
+    $installRoot = Get-InstallRoot
+    return (Join-Path $installRoot 'scripts\list-sonos-speakers.ps1')
 }
 
 function New-StarterScriptArguments {
@@ -58,43 +57,337 @@ function Get-SettingsFilePath {
     return (Join-Path $appDataRoot 'settings.json')
 }
 
-function Get-ConfiguredSpeakerIp {
+function Get-ConfiguredSpeaker {
     $settingsPath = Get-SettingsFilePath
+    $speakerIp = ''
+    $speakerName = ''
+
     if (-not (Test-Path $settingsPath)) {
-        return ''
+        return [PSCustomObject]@{
+            ip = $speakerIp
+            name = $speakerName
+        }
     }
 
     try {
         $settings = Get-Content -Path $settingsPath -Raw | ConvertFrom-Json
-        if ($settings.speaker_ip) {
-            return [string]$settings.speaker_ip
+        if ($settings.PSObject.Properties['speaker_ip'] -and $settings.speaker_ip) {
+            $speakerIp = [string]$settings.speaker_ip
+        }
+        if ($settings.PSObject.Properties['speaker_name'] -and $settings.speaker_name) {
+            $speakerName = [string]$settings.speaker_name
         }
     }
     catch {
         Write-AppLog "Failed to parse settings file '$settingsPath': $($_.Exception.Message)"
     }
 
-    return ''
+    return [PSCustomObject]@{
+        ip = $speakerIp
+        name = $speakerName
+    }
 }
 
-function Set-ConfiguredSpeakerIp {
-    param([Parameter(Mandatory = $true)][string]$SpeakerIp)
+function Get-ConfiguredSpeakerIp {
+    $speaker = Get-ConfiguredSpeaker
+    return [string]$speaker.ip
+}
+
+function Set-ConfiguredSpeaker {
+    param(
+        [Parameter(Mandatory = $true)][string]$SpeakerIp,
+        [string]$SpeakerName = ''
+    )
 
     $settingsPath = Get-SettingsFilePath
     $settings = [ordered]@{
         speaker_ip = $SpeakerIp
+        speaker_name = $SpeakerName
         last_updated_utc = (Get-Date).ToUniversalTime().ToString('o')
     }
     $settings | ConvertTo-Json | Set-Content -Path $settingsPath -Encoding UTF8
 }
 
+function Format-SpeakerLabel {
+    param(
+        [Parameter(Mandatory = $true)][string]$SpeakerIp,
+        [string]$SpeakerName = ''
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($SpeakerName)) {
+        return "$SpeakerName ($SpeakerIp)"
+    }
+
+    return $SpeakerIp
+}
+
+function Test-LocalIpv4Address {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $ipAddress = $null
+    if (-not [System.Net.IPAddress]::TryParse($Value, [ref]$ipAddress)) {
+        return $false
+    }
+
+    if ($ipAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $false
+    }
+
+    $bytes = $ipAddress.GetAddressBytes()
+    if ($bytes[0] -eq 10) {
+        return $true
+    }
+
+    if ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) {
+        return $true
+    }
+
+    if ($bytes[0] -eq 192 -and $bytes[1] -eq 168) {
+        return $true
+    }
+
+    if ($bytes[0] -eq 169 -and $bytes[1] -eq 254) {
+        return $true
+    }
+
+    return $false
+}
+
 function Prompt-SpeakerIp {
     $currentValue = Get-ConfiguredSpeakerIp
     return [Microsoft.VisualBasic.Interaction]::InputBox(
-        'Enter the Sonos speaker IP address to use for audio redirection.',
+        'Enter the local Sonos speaker IPv4 address to use for audio redirection.',
         'WinToSonos Speaker',
         $currentValue
     )
+}
+
+function Get-DiscoveredSpeakers {
+    param([double]$TimeoutSeconds = 2.5)
+
+    $listScript = Get-ListSpeakersScriptPath
+    if (-not (Test-Path $listScript)) {
+        throw "Speaker discovery script not found at '$listScript'."
+    }
+
+    $installRoot = Get-InstallRoot
+
+    $rawOutput = & $listScript -InstallDir $installRoot -TimeoutSeconds $TimeoutSeconds
+    $rawText = ($rawOutput | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($rawText)) {
+        return @()
+    }
+
+    try {
+        $parsed = $rawText | ConvertFrom-Json
+    }
+    catch {
+        throw "Speaker discovery returned invalid JSON output: $($_.Exception.Message)"
+    }
+
+    $items = @()
+    if ($parsed -is [System.Array]) {
+        $items = $parsed
+    }
+    elseif ($null -ne $parsed) {
+        $items = @($parsed)
+    }
+
+    $speakers = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $items) {
+        if ($null -eq $item) {
+            continue
+        }
+
+        $speakerIp = ''
+        $speakerName = 'Sonos speaker'
+
+        if ($item.PSObject.Properties['ip'] -and $item.ip) {
+            $speakerIp = [string]$item.ip
+        }
+
+        if ([string]::IsNullOrWhiteSpace($speakerIp)) {
+            continue
+        }
+
+        if ($item.PSObject.Properties['name'] -and -not [string]::IsNullOrWhiteSpace([string]$item.name)) {
+            $speakerName = [string]$item.name
+        }
+
+        $speakers.Add([PSCustomObject]@{
+            name = $speakerName
+            ip = $speakerIp
+        })
+    }
+
+    $sortedSpeakers = $speakers | Sort-Object -Property @{ Expression = 'name'; Ascending = $true }, @{ Expression = 'ip'; Ascending = $true }
+    $seenIps = @{}
+    $dedupedSpeakers = New-Object System.Collections.Generic.List[object]
+
+    foreach ($speaker in $sortedSpeakers) {
+        $speakerIp = [string]$speaker.ip
+        if ($seenIps.ContainsKey($speakerIp)) {
+            continue
+        }
+
+        $seenIps[$speakerIp] = $true
+        $dedupedSpeakers.Add([PSCustomObject]@{
+            name = [string]$speaker.name
+            ip = $speakerIp
+        })
+    }
+
+    return @($dedupedSpeakers)
+}
+
+function Prompt-SpeakerSelection {
+    $configuredSpeaker = Get-ConfiguredSpeaker
+    $configuredSpeakerIp = [string]$configuredSpeaker.ip
+    $configuredSpeakerName = [string]$configuredSpeaker.name
+
+    $discoveredSpeakers = @()
+    try {
+        $discoveredSpeakers = Get-DiscoveredSpeakers -TimeoutSeconds 2.5
+    }
+    catch {
+        Write-AppLog "Speaker discovery failed: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Speaker discovery failed.`n`n$($_.Exception.Message)`n`nYou can still enter a speaker IP manually.",
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+
+        $manualIp = Prompt-SpeakerIp
+        if ([string]::IsNullOrWhiteSpace($manualIp)) {
+            return $null
+        }
+
+        return [PSCustomObject]@{
+            ip = $manualIp.Trim()
+            name = ''
+        }
+    }
+
+    if ($discoveredSpeakers.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'No Sonos speakers were discovered on the local network. Enter a local speaker IP manually.',
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+
+        $manualIp = Prompt-SpeakerIp
+        if ([string]::IsNullOrWhiteSpace($manualIp)) {
+            return $null
+        }
+
+        return [PSCustomObject]@{
+            ip = $manualIp.Trim()
+            name = ''
+        }
+    }
+
+    $speakerLines = New-Object System.Collections.Generic.List[string]
+    $defaultValue = $configuredSpeakerIp
+
+    for ($index = 0; $index -lt $discoveredSpeakers.Count; $index++) {
+        $speaker = $discoveredSpeakers[$index]
+        $speakerLines.Add(("{0}. {1} ({2})" -f ($index + 1), $speaker.name, $speaker.ip))
+
+        if (
+            (-not [string]::IsNullOrWhiteSpace($configuredSpeakerIp) -and $speaker.ip -eq $configuredSpeakerIp) -or
+            (-not [string]::IsNullOrWhiteSpace($configuredSpeakerName) -and $speaker.name -eq $configuredSpeakerName)
+        ) {
+            $defaultValue = ($index + 1).ToString()
+        }
+    }
+
+    $selectionPrompt =
+        "Discovered Sonos speakers on your local network:`n`n" +
+        ($speakerLines -join "`n") +
+        "`n`nEnter a number to select a speaker, or type a local IPv4 address."
+
+    while ($true) {
+        $selection = [Microsoft.VisualBasic.Interaction]::InputBox(
+            $selectionPrompt,
+            'WinToSonos Speaker',
+            $defaultValue
+        )
+
+        if ([string]::IsNullOrWhiteSpace($selection)) {
+            return $null
+        }
+
+        $trimmed = $selection.Trim()
+
+        $selectedIndex = 0
+        if ([int]::TryParse($trimmed, [ref]$selectedIndex)) {
+            if ($selectedIndex -ge 1 -and $selectedIndex -le $discoveredSpeakers.Count) {
+                $selectedSpeaker = $discoveredSpeakers[$selectedIndex - 1]
+                return [PSCustomObject]@{
+                    ip = [string]$selectedSpeaker.ip
+                    name = [string]$selectedSpeaker.name
+                }
+            }
+        }
+
+        $nameMatches = @($discoveredSpeakers | Where-Object { $_.name -ieq $trimmed })
+        if ($nameMatches.Count -eq 1) {
+            return [PSCustomObject]@{
+                ip = [string]$nameMatches[0].ip
+                name = [string]$nameMatches[0].name
+            }
+        }
+
+        $ipMatches = @($discoveredSpeakers | Where-Object { $_.ip -eq $trimmed })
+        if ($ipMatches.Count -ge 1) {
+            return [PSCustomObject]@{
+                ip = [string]$ipMatches[0].ip
+                name = [string]$ipMatches[0].name
+            }
+        }
+
+        if (Test-LocalIpv4Address -Value $trimmed) {
+            return [PSCustomObject]@{
+                ip = $trimmed
+                name = ''
+            }
+        }
+
+        [System.Windows.Forms.MessageBox]::Show(
+            'Invalid selection. Enter a listed number or a local IPv4 address (for example 192.168.1.50).',
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+
+        $defaultValue = $trimmed
+    }
+}
+
+function Select-ConfiguredSpeaker {
+    $selectedSpeaker = Prompt-SpeakerSelection
+    if ($null -eq $selectedSpeaker) {
+        return $null
+    }
+
+    $speakerIp = [string]$selectedSpeaker.ip
+    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
+        return $null
+    }
+
+    if (-not (Test-LocalIpv4Address -Value $speakerIp)) {
+        throw "Speaker address '$speakerIp' must be a local-network IPv4 address."
+    }
+
+    $speakerName = [string]$selectedSpeaker.name
+    Set-ConfiguredSpeaker -SpeakerIp $speakerIp -SpeakerName $speakerName
+
+    return [PSCustomObject]@{
+        ip = $speakerIp
+        name = $speakerName
+    }
 }
 
 function Get-StartRedirectScriptPath {
@@ -113,24 +406,38 @@ function Start-AudioRedirect {
         throw "Audio redirect start script not found at '$startScript'."
     }
 
-    $speakerIp = Get-ConfiguredSpeakerIp
-    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
-        $speakerIp = Prompt-SpeakerIp
-    }
+    $configuredSpeaker = Get-ConfiguredSpeaker
+    $speakerIp = [string]$configuredSpeaker.ip
+    $speakerName = [string]$configuredSpeaker.name
 
     if ([string]::IsNullOrWhiteSpace($speakerIp)) {
-        Write-AppLog 'Audio redirect start cancelled (no speaker IP selected).'
-        return
+        $selectedSpeaker = Select-ConfiguredSpeaker
+        if ($null -eq $selectedSpeaker) {
+            Write-AppLog 'Audio redirect start cancelled (no speaker selected).'
+            return
+        }
+
+        $speakerIp = [string]$selectedSpeaker.ip
+        $speakerName = [string]$selectedSpeaker.name
     }
 
-    Set-ConfiguredSpeakerIp -SpeakerIp $speakerIp
+    if (-not (Test-LocalIpv4Address -Value $speakerIp)) {
+        throw "Speaker address '$speakerIp' must be a local-network IPv4 address."
+    }
+
+    Set-ConfiguredSpeaker -SpeakerIp $speakerIp -SpeakerName $speakerName
 
     $installRoot = Get-InstallRoot
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`" -InstallDir `"$installRoot`" -SpeakerIp `"$speakerIp`""
+    if (-not [string]::IsNullOrWhiteSpace($speakerName)) {
+        $arguments += " -SpeakerName `"$speakerName`""
+    }
+
     Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden | Out-Null
 
-    Write-AppLog "Audio redirect start requested for speaker $speakerIp."
-    $notifyIcon.BalloonTipText = "Starting audio redirection to $speakerIp."
+    $speakerLabel = Format-SpeakerLabel -SpeakerIp $speakerIp -SpeakerName $speakerName
+    Write-AppLog "Audio redirect start requested for speaker $speakerLabel."
+    $notifyIcon.BalloonTipText = "Starting audio redirection to $speakerLabel."
     $notifyIcon.ShowBalloonTip(2500)
 }
 
@@ -215,7 +522,6 @@ $notifyIcon.Visible = $true
 
 $contextMenu = [System.Windows.Forms.ContextMenuStrip]::new()
 
-$openSonosItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Sonos Web')
 $openLogItem = [System.Windows.Forms.ToolStripMenuItem]::new('Open Log Folder')
 $selectSpeakerItem = [System.Windows.Forms.ToolStripMenuItem]::new('Select speaker...')
 $startRedirectItem = [System.Windows.Forms.ToolStripMenuItem]::new('Start audio redirect')
@@ -226,11 +532,6 @@ $startupToggleItem.Checked = Test-StartAtLoginEnabled
 $aboutItem = [System.Windows.Forms.ToolStripMenuItem]::new('About')
 $exitItem = [System.Windows.Forms.ToolStripMenuItem]::new('Exit')
 
-$openSonosItem.Add_Click({
-    Write-AppLog 'Opening Sonos web.'
-    Open-DefaultBrowser -Url $SonosWebUrl
-})
-
 $openLogItem.Add_Click({
     Write-AppLog 'Opening log folder.'
     Start-Process (Split-Path -Path $LogFile -Parent) | Out-Null
@@ -238,16 +539,25 @@ $openLogItem.Add_Click({
 
 $selectSpeakerItem.Add_Click({
     try {
-        $speakerIp = Prompt-SpeakerIp
-        if (-not [string]::IsNullOrWhiteSpace($speakerIp)) {
-            Set-ConfiguredSpeakerIp -SpeakerIp $speakerIp
-            Write-AppLog "Speaker selection updated to $speakerIp."
-            $notifyIcon.BalloonTipText = "Speaker set to $speakerIp."
-            $notifyIcon.ShowBalloonTip(2000)
+        $selectedSpeaker = Select-ConfiguredSpeaker
+        if ($null -eq $selectedSpeaker) {
+            Write-AppLog 'Speaker selection cancelled.'
+            return
         }
+
+        $speakerLabel = Format-SpeakerLabel -SpeakerIp $selectedSpeaker.ip -SpeakerName $selectedSpeaker.name
+        Write-AppLog "Speaker selection updated to $speakerLabel."
+        $notifyIcon.BalloonTipText = "Speaker set to $speakerLabel."
+        $notifyIcon.ShowBalloonTip(2000)
     }
     catch {
         Write-AppLog "Failed to set speaker selection: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not set speaker selection.`n`n$($_.Exception.Message)",
+            'WinToSonos',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
     }
 })
 
@@ -305,13 +615,17 @@ $startupToggleItem.Add_Click({
 })
 
 $aboutItem.Add_Click({
-    $speakerIp = Get-ConfiguredSpeakerIp
-    if ([string]::IsNullOrWhiteSpace($speakerIp)) {
-        $speakerIp = '(not set)'
+    $configuredSpeaker = Get-ConfiguredSpeaker
+    $speakerIp = [string]$configuredSpeaker.ip
+    $speakerName = [string]$configuredSpeaker.name
+
+    $speakerLabel = '(not set)'
+    if (-not [string]::IsNullOrWhiteSpace($speakerIp)) {
+        $speakerLabel = Format-SpeakerLabel -SpeakerIp $speakerIp -SpeakerName $speakerName
     }
 
     [System.Windows.Forms.MessageBox]::Show(
-        "WinToSonos redirects Windows output audio to a Sonos speaker on your local network.`n`nCurrent speaker:`n$speakerIp`n`nLog file:`n$LogFile",
+        "WinToSonos redirects Windows output audio to a Sonos speaker on your local network.`n`nCurrent speaker:`n$speakerLabel`n`nLog file:`n$LogFile",
         'About WinToSonos',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information
@@ -324,7 +638,6 @@ $exitItem.Add_Click({
     $script:shouldExit = $true
 })
 
-[void]$contextMenu.Items.Add($openSonosItem)
 [void]$contextMenu.Items.Add($selectSpeakerItem)
 [void]$contextMenu.Items.Add($startRedirectItem)
 [void]$contextMenu.Items.Add($stopRedirectItem)

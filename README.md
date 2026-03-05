@@ -32,13 +32,13 @@ WinToSonos creates a local virtual environment on first redirect start and insta
 
 1. Launch WinToSonos from Start menu.
 2. Click the tray icon.
-3. Use `Select speaker...` and enter your Sonos speaker local-network IPv4 address (for example `192.168.x.x`).
+3. Use `Select speaker...` to discover Sonos speakers on your LAN and pick one from the list (or enter a local speaker IP manually).
 4. Click `Start audio redirect`.
 5. When finished, click `Stop audio redirect`.
 
 ### Tray menu actions
 
-- `Select speaker...` saves your preferred speaker IP.
+- `Select speaker...` discovers Sonos speakers on your local network, lists them for quick selection, and saves your preferred speaker.
 - `Start audio redirect` starts local audio capture and sends playback to selected Sonos.
 - `Stop audio redirect` stops Sonos playback, restores the previous Sonos source when available, and terminates local streaming. If the speaker has already switched away from the WinToSonos stream, stop exits safely without interrupting current playback. If the saved previous source is itself the WinToSonos stream (for example after restarting redirect), restore is skipped to avoid leaving Sonos on a stale local stream URL.
 - `Run at startup` toggles launching WinToSonos at Windows sign-in.

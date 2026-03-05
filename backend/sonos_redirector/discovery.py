@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import time
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
@@ -14,6 +15,13 @@ def parse_location_from_ssdp(reply: str) -> str | None:
         if line.lower().startswith("location:"):
             return line.split(":", 1)[1].strip()
     return None
+
+
+def reply_looks_like_sonos(reply: str) -> bool:
+    for line in reply.splitlines():
+        if line.lower().startswith("server:"):
+            return "sonos" in line.lower()
+    return False
 
 
 def parse_av_transport_control_url(device_description_xml: str) -> str | None:
@@ -38,7 +46,7 @@ def parse_ip_from_location(location: str) -> str | None:
     return parsed.hostname
 
 
-def discover_sonos_locations(timeout_s: float = 1.5) -> list[str]:
+def discover_sonos_locations(timeout_s: float = 1.5, attempts: int = 3) -> list[str]:
     query = "\r\n".join(
         [
             "M-SEARCH * HTTP/1.1",
@@ -51,16 +59,37 @@ def discover_sonos_locations(timeout_s: float = 1.5) -> list[str]:
         ]
     ).encode("utf-8")
 
+    discovery_attempts = max(1, int(attempts))
+    timeout_s = max(0.1, float(timeout_s))
+    deadline = time.monotonic() + timeout_s
+
     locations: set[str] = set()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
-        sock.settimeout(timeout_s)
-        sock.sendto(query, SSDP_MULTICAST)
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+        except OSError:
+            pass
+
+        for _ in range(discovery_attempts):
+            sock.sendto(query, SSDP_MULTICAST)
+
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            sock.settimeout(min(0.25, remaining))
             try:
                 data, _ = sock.recvfrom(8192)
             except socket.timeout:
-                break
-            location = parse_location_from_ssdp(data.decode("utf-8", errors="ignore"))
+                continue
+
+            reply = data.decode("utf-8", errors="ignore")
+            if not reply_looks_like_sonos(reply):
+                continue
+
+            location = parse_location_from_ssdp(reply)
             if location:
                 locations.add(location)
+
     return sorted(locations)

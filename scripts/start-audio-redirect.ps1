@@ -2,6 +2,7 @@
 param(
     [string]$InstallDir,
     [string]$SpeakerIp,
+    [string]$SpeakerName,
     [int]$Port = 8090,
     [string]$StreamPath = '/stream',
     [string]$Title = 'Windows Audio'
@@ -27,7 +28,27 @@ function Resolve-BootstrapPython {
         }
     }
 
+    $python3 = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($python3) {
+        return @{
+            Path = $python3.Source
+            PrefixArgs = @()
+        }
+    }
+
     throw 'Python was not found. Install Python 3.10+ and retry.'
+}
+
+function Get-StateRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return (Join-Path $env:LOCALAPPDATA 'WinToSonos')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:HOME)) {
+        return (Join-Path (Join-Path $env:HOME '.local/share') 'WinToSonos')
+    }
+
+    throw 'Could not resolve WinToSonos state directory. Set LOCALAPPDATA or HOME.'
 }
 
 function Invoke-CheckedCommand {
@@ -85,18 +106,35 @@ if (-not (Test-Path $requirementsFile)) {
     throw "Redirector requirements file not found at '$requirementsFile'."
 }
 
-$stateRoot = Join-Path $env:LOCALAPPDATA 'WinToSonos'
+$stateRoot = Get-StateRoot
 New-Item -Path $stateRoot -ItemType Directory -Force | Out-Null
 
 $settingsFile = Join-Path $stateRoot 'settings.json'
-if ([string]::IsNullOrWhiteSpace($SpeakerIp) -and (Test-Path $settingsFile)) {
+$settings = $null
+if (Test-Path $settingsFile) {
     try {
         $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json
-        if ($settings.speaker_ip) {
-            $SpeakerIp = [string]$settings.speaker_ip
-        }
     }
     catch {
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($SpeakerIp) -and $null -ne $settings) {
+    if ($settings.PSObject.Properties['speaker_ip'] -and $settings.speaker_ip) {
+        $SpeakerIp = [string]$settings.speaker_ip
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($SpeakerName) -and $null -ne $settings) {
+    if ($settings.PSObject.Properties['speaker_name'] -and $settings.speaker_name) {
+        $savedSpeakerIp = ''
+        if ($settings.PSObject.Properties['speaker_ip'] -and $settings.speaker_ip) {
+            $savedSpeakerIp = [string]$settings.speaker_ip
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SpeakerIp) -or $savedSpeakerIp -eq $SpeakerIp) {
+            $SpeakerName = [string]$settings.speaker_name
+        }
     }
 }
 
@@ -147,8 +185,14 @@ Set-Content -Path $pidFile -Value $process.Id -Encoding ASCII
 
 $persistedSettings = [ordered]@{
     speaker_ip = $SpeakerIp
+    speaker_name = $SpeakerName
     last_updated_utc = (Get-Date).ToUniversalTime().ToString('o')
 }
 $persistedSettings | ConvertTo-Json | Set-Content -Path $settingsFile -Encoding UTF8
 
-Write-Host "WinToSonos redirection started to speaker $SpeakerIp (PID: $($process.Id))."
+if ([string]::IsNullOrWhiteSpace($SpeakerName)) {
+    Write-Host "WinToSonos redirection started to speaker $SpeakerIp (PID: $($process.Id))."
+}
+else {
+    Write-Host "WinToSonos redirection started to speaker $SpeakerName ($SpeakerIp) (PID: $($process.Id))."
+}

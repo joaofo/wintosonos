@@ -2,6 +2,7 @@ from sonos_redirector.discovery import (
     parse_av_transport_control_url,
     parse_friendly_name,
     parse_location_from_ssdp,
+    reply_looks_like_sonos,
 )
 
 SSDP_REPLY = """HTTP/1.1 200 OK\r
@@ -39,3 +40,17 @@ def test_parse_av_transport_control_url() -> None:
 
 def test_parse_friendly_name() -> None:
     assert parse_friendly_name(DEVICE_DESCRIPTION) == "Living Room"
+
+
+def test_reply_looks_like_sonos() -> None:
+    assert reply_looks_like_sonos(SSDP_REPLY) is True
+
+
+def test_reply_without_sonos_server_header_is_rejected() -> None:
+    non_sonos_reply = """HTTP/1.1 200 OK\r
+LOCATION: http://192.168.1.20:1400/xml/device_description.xml\r
+SERVER: Linux UPnP/1.0 GenericDevice/1.0\r
+\r
+"""
+
+    assert reply_looks_like_sonos(non_sonos_reply) is False
