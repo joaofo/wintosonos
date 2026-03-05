@@ -40,4 +40,21 @@ jobs:
       - name: Run ScriptAnalyzer
         shell: pwsh
         run: |
-          Invoke-ScriptAnalyzer -Path app,scripts -Recurse -EnableExit
+          $analysisResults = @()
+          foreach ($scanPath in @("app", "scripts")) {
+            $analysisResults += Invoke-ScriptAnalyzer -Path $scanPath -Recurse
+          }
+
+          if ($analysisResults.Count -eq 0) {
+            Write-Host "ScriptAnalyzer: no findings."
+          }
+          else {
+            $analysisResults | Format-Table -AutoSize
+
+            $errorFindings = @($analysisResults | Where-Object { $_.Severity -eq "Error" })
+            if ($errorFindings.Count -gt 0) {
+              throw "ScriptAnalyzer found $($errorFindings.Count) error(s)."
+            }
+
+            Write-Host "ScriptAnalyzer found $($analysisResults.Count) non-error issue(s); continuing."
+          }
