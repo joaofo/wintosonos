@@ -7,42 +7,83 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-CommandPath {
+    param([Parameter(Mandatory = $true)][string]$CommandName)
+
+    $commandInfo = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $commandInfo) {
+        return ''
+    }
+
+    foreach ($propertyName in @('Path', 'Source', 'Definition', 'Name')) {
+        $property = $commandInfo.PSObject.Properties[$propertyName]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+
+    return ''
+}
+
+function Test-PythonRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$PrefixArgs = @()
+    )
+
+    $probeArgs = @()
+    $probeArgs += $PrefixArgs
+    $probeArgs += @('-c', 'import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)')
+
+    try {
+        & $Path @probeArgs | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Resolve-DiscoveryPython {
     param([Parameter(Mandatory = $true)][string]$StateRoot)
 
-    $venvPython = Join-Path $StateRoot 'venv\Scripts\python.exe'
-    if (Test-Path $venvPython) {
-        return @{
-            Path = $venvPython
-            PrefixArgs = @()
+    $venvCandidates = @(
+        (Join-Path $StateRoot 'venv\Scripts\python.exe'),
+        (Join-Path $StateRoot 'venv/bin/python')
+    )
+
+    foreach ($venvPython in $venvCandidates) {
+        if (Test-Path $venvPython) {
+            return @{
+                Path = $venvPython
+                PrefixArgs = @()
+            }
         }
     }
 
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher) {
+    $pythonCandidates = @(
+        @{ Name = 'py'; PrefixArgs = @('-3') },
+        @{ Name = 'python3'; PrefixArgs = @() },
+        @{ Name = 'python'; PrefixArgs = @() }
+    )
+
+    foreach ($candidate in $pythonCandidates) {
+        $candidatePath = Resolve-CommandPath -CommandName $candidate.Name
+        if ([string]::IsNullOrWhiteSpace($candidatePath)) {
+            continue
+        }
+
+        if (-not (Test-PythonRuntime -Path $candidatePath -PrefixArgs $candidate.PrefixArgs)) {
+            continue
+        }
+
         return @{
-            Path = $pyLauncher.Source
-            PrefixArgs = @('-3')
+            Path = $candidatePath
+            PrefixArgs = $candidate.PrefixArgs
         }
     }
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
-        return @{
-            Path = $python.Source
-            PrefixArgs = @()
-        }
-    }
-
-    $python3 = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($python3) {
-        return @{
-            Path = $python3.Source
-            PrefixArgs = @()
-        }
-    }
-
-    throw 'Python was not found. Install Python 3.10+ and retry.'
+    throw 'Python 3 runtime not available for speaker discovery. Start audio redirect once to initialize WinToSonos, or install Python 3.10+ and ensure py/python is available.'
 }
 
 function Get-StateRoot {
