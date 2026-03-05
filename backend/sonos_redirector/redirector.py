@@ -13,7 +13,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 from sonos_redirector.discovery import (
@@ -195,6 +195,32 @@ def is_ip_address(value: str) -> bool:
 
 def normalize_speaker_name(value: str) -> str:
     return " ".join(value.strip().lower().split())
+
+
+def canonicalize_http_url(url: str) -> str:
+    candidate = url.strip()
+    if not candidate:
+        return ""
+
+    parsed = urlsplit(candidate)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not hostname:
+        return candidate
+
+    default_port = 443 if scheme == "https" else 80
+    port = parsed.port or default_port
+    path = parsed.path or "/"
+
+    return f"{scheme}://{hostname}:{port}{path}"
+
+
+def stream_url_matches_state(*, current_uri: str, state_stream_url: str) -> bool:
+    canonical_current = canonicalize_http_url(current_uri)
+    canonical_state = canonicalize_http_url(state_stream_url)
+    if not canonical_current or not canonical_state:
+        return False
+    return canonical_current == canonical_state
 
 
 def format_speaker_choices(speakers: list[dict[str, str]]) -> str:
@@ -495,6 +521,7 @@ def run_stop(args: argparse.Namespace) -> int:
     state_speaker_ip = ""
     state_speaker_name = ""
     state_endpoint = ""
+    state_stream_url = ""
 
     if state:
         state_speaker_ip_value = state.get("speaker_ip")
@@ -508,6 +535,10 @@ def run_stop(args: argparse.Namespace) -> int:
         state_endpoint_value = state.get("endpoint")
         if isinstance(state_endpoint_value, str):
             state_endpoint = state_endpoint_value.strip()
+
+        state_stream_url_value = state.get("stream_url")
+        if isinstance(state_stream_url_value, str):
+            state_stream_url = state_stream_url_value.strip()
 
     speaker_ip = explicit_speaker_ip or state_speaker_ip
     speaker_name = explicit_speaker_name or state_speaker_name
@@ -533,6 +564,26 @@ def run_stop(args: argparse.Namespace) -> int:
         previous_uri_metadata_value = state.get("previous_uri_metadata")
         if isinstance(previous_uri_metadata_value, str):
             previous_uri_metadata = previous_uri_metadata_value
+
+    if state_stream_url and endpoint and not explicit_selector:
+        try:
+            current_uri, _ = fetch_current_transport_source(
+                endpoint,
+                timeout_s=args.soap_timeout,
+                retries=args.soap_retries,
+                retry_delay_s=args.soap_retry_delay,
+            )
+        except Exception as exc:
+            print(f"Warning: unable to verify active Sonos stream before stop: {exc}")
+        else:
+            if current_uri and not stream_url_matches_state(current_uri=current_uri, state_stream_url=state_stream_url):
+                print(
+                    "Detected that Sonos is no longer using the active WinToSonos stream; "
+                    "skipping stop/restore to avoid interrupting playback"
+                )
+                if not args.keep_state:
+                    remove_state_file(args.state_file)
+                return 0
 
     try:
         send_soap(
