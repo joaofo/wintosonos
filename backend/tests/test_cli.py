@@ -205,6 +205,103 @@ def test_run_stop_no_restore_flag_skips_previous_source_restore() -> None:
         assert [call[1] for call in soap_calls] == ["Stop"]
 
 
+def test_run_stop_uses_explicit_speaker_ip_to_resolve_endpoint() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        state_file = f"{temp_dir}/redirect-state.json"
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "speaker_ip": "192.168.1.50",
+                    "endpoint": "http://192.168.1.50:1400/MediaRenderer/AVTransport/Control",
+                },
+                f,
+            )
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "stop",
+                "--state-file",
+                state_file,
+                "--speaker-ip",
+                "192.168.1.99",
+                "--no-restore-previous-source",
+            ]
+        )
+
+        fetch_calls = []
+        soap_calls = []
+        original_fetch_av_transport_endpoint = redirector.fetch_av_transport_endpoint
+        original_send_soap = redirector.send_soap
+
+        def fake_fetch_av_transport_endpoint(speaker_ip):
+            fetch_calls.append(speaker_ip)
+            return f"http://{speaker_ip}:1400/MediaRenderer/AVTransport/Control"
+
+        def fake_send_soap(endpoint, action, payload, **kwargs):
+            soap_calls.append((endpoint, action, payload, kwargs))
+            return None
+
+        redirector.fetch_av_transport_endpoint = fake_fetch_av_transport_endpoint
+        redirector.send_soap = fake_send_soap
+        try:
+            exit_code = redirector.run_stop(args)
+        finally:
+            redirector.fetch_av_transport_endpoint = original_fetch_av_transport_endpoint
+            redirector.send_soap = original_send_soap
+
+        assert exit_code == 0
+        assert fetch_calls == ["192.168.1.99"]
+        assert [call[1] for call in soap_calls] == ["Stop"]
+        assert soap_calls[0][0] == "http://192.168.1.99:1400/MediaRenderer/AVTransport/Control"
+
+
+def test_run_stop_retries_with_discovered_endpoint_when_state_endpoint_fails() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        state_file = f"{temp_dir}/redirect-state.json"
+        stale_endpoint = "http://192.168.1.50:1400/MediaRenderer/AVTransport/Control"
+        refreshed_endpoint = "http://192.168.1.51:1400/MediaRenderer/AVTransport/Control"
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "speaker_ip": "192.168.1.51",
+                    "endpoint": stale_endpoint,
+                },
+                f,
+            )
+
+        parser = build_parser()
+        args = parser.parse_args(["stop", "--state-file", state_file, "--no-restore-previous-source"])
+
+        fetch_calls = []
+        soap_calls = []
+        original_fetch_av_transport_endpoint = redirector.fetch_av_transport_endpoint
+        original_send_soap = redirector.send_soap
+
+        def fake_fetch_av_transport_endpoint(speaker_ip):
+            fetch_calls.append(speaker_ip)
+            return refreshed_endpoint
+
+        def flaky_send_soap(endpoint, action, payload, **kwargs):
+            soap_calls.append((endpoint, action, payload, kwargs))
+            if action == "Stop" and endpoint == stale_endpoint:
+                raise RuntimeError("stale endpoint")
+            return None
+
+        redirector.fetch_av_transport_endpoint = fake_fetch_av_transport_endpoint
+        redirector.send_soap = flaky_send_soap
+        try:
+            exit_code = redirector.run_stop(args)
+        finally:
+            redirector.fetch_av_transport_endpoint = original_fetch_av_transport_endpoint
+            redirector.send_soap = original_send_soap
+
+        assert exit_code == 0
+        assert fetch_calls == ["192.168.1.51"]
+        assert [call[0] for call in soap_calls] == [stale_endpoint, refreshed_endpoint]
+        assert [call[1] for call in soap_calls] == ["Stop", "Stop"]
+
+
 def test_run_stop_restore_failure_still_succeeds_and_cleans_state() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         state_file = f"{temp_dir}/redirect-state.json"

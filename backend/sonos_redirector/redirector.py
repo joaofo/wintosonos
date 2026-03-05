@@ -373,19 +373,31 @@ def run_start(args: argparse.Namespace) -> int:
 def run_stop(args: argparse.Namespace) -> int:
     state = read_state_file(args.state_file)
 
-    speaker_ip = args.speaker_ip
-    endpoint = None
+    explicit_speaker_ip = (args.speaker_ip or "").strip()
+    state_speaker_ip = ""
+    state_endpoint = ""
+
     if state:
-        speaker_ip = speaker_ip or str(state.get("speaker_ip", ""))
-        endpoint_value = state.get("endpoint")
-        if isinstance(endpoint_value, str) and endpoint_value:
-            endpoint = endpoint_value
+        state_speaker_ip_value = state.get("speaker_ip")
+        if isinstance(state_speaker_ip_value, str):
+            state_speaker_ip = state_speaker_ip_value.strip()
+
+        state_endpoint_value = state.get("endpoint")
+        if isinstance(state_endpoint_value, str):
+            state_endpoint = state_endpoint_value.strip()
+
+    speaker_ip = explicit_speaker_ip or state_speaker_ip
+
+    endpoint = ""
+    if explicit_speaker_ip:
+        endpoint = fetch_av_transport_endpoint(explicit_speaker_ip)
+    elif state_endpoint:
+        endpoint = state_endpoint
+    elif speaker_ip:
+        endpoint = fetch_av_transport_endpoint(speaker_ip)
 
     if not speaker_ip and not endpoint:
         raise RuntimeError("No running redirect state found. Provide --speaker-ip to force stop.")
-
-    if endpoint is None:
-        endpoint = fetch_av_transport_endpoint(str(speaker_ip))
 
     previous_uri = ""
     previous_uri_metadata = ""
@@ -398,14 +410,32 @@ def run_stop(args: argparse.Namespace) -> int:
         if isinstance(previous_uri_metadata_value, str):
             previous_uri_metadata = previous_uri_metadata_value
 
-    send_soap(
-        endpoint,
-        "Stop",
-        build_stop_envelope(),
-        timeout_s=args.soap_timeout,
-        retries=args.soap_retries,
-        retry_delay_s=args.soap_retry_delay,
-    )
+    try:
+        send_soap(
+            endpoint,
+            "Stop",
+            build_stop_envelope(),
+            timeout_s=args.soap_timeout,
+            retries=args.soap_retries,
+            retry_delay_s=args.soap_retry_delay,
+        )
+    except Exception:
+        can_retry_with_discovery = bool(speaker_ip) and not explicit_speaker_ip and bool(state_endpoint)
+        if not can_retry_with_discovery:
+            raise
+
+        refreshed_endpoint = fetch_av_transport_endpoint(speaker_ip)
+        if refreshed_endpoint != endpoint:
+            endpoint = refreshed_endpoint
+
+        send_soap(
+            endpoint,
+            "Stop",
+            build_stop_envelope(),
+            timeout_s=args.soap_timeout,
+            retries=args.soap_retries,
+            retry_delay_s=args.soap_retry_delay,
+        )
 
     restored_previous_source = False
     restore_error: Exception | None = None
