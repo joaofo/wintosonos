@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import queue
@@ -184,6 +185,92 @@ def discover_speakers(timeout_s: float) -> list[dict[str, str]]:
     return sorted(speakers, key=lambda s: (s.get("name", ""), s.get("ip", "")))
 
 
+def is_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_speaker_name(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def format_speaker_choices(speakers: list[dict[str, str]]) -> str:
+    labels = [f"{speaker.get('name', 'Sonos speaker')} ({speaker.get('ip', 'unknown')})" for speaker in speakers]
+    return ", ".join(sorted(labels))
+
+
+def resolve_speaker_selector(selector: str, timeout_s: float) -> dict[str, str]:
+    normalized_selector = selector.strip()
+    if not normalized_selector:
+        raise RuntimeError("Speaker selector is empty")
+
+    if is_ip_address(normalized_selector):
+        return {
+            "name": "",
+            "ip": normalized_selector,
+            "location": "",
+        }
+
+    speakers = discover_speakers(timeout_s=timeout_s)
+    if not speakers:
+        raise RuntimeError(
+            "No Sonos speakers discovered on the local network while resolving speaker selector"
+        )
+
+    requested_name = normalize_speaker_name(normalized_selector)
+    exact_matches = [speaker for speaker in speakers if normalize_speaker_name(speaker.get("name", "")) == requested_name]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        raise RuntimeError(
+            f"Speaker selector '{selector}' matched multiple speakers: {format_speaker_choices(exact_matches)}"
+        )
+
+    partial_matches = [speaker for speaker in speakers if requested_name in normalize_speaker_name(speaker.get("name", ""))]
+    if len(partial_matches) == 1:
+        return partial_matches[0]
+    if len(partial_matches) > 1:
+        raise RuntimeError(
+            f"Speaker selector '{selector}' is ambiguous: {format_speaker_choices(partial_matches)}"
+        )
+
+    raise RuntimeError(
+        f"Speaker selector '{selector}' did not match discovered speakers: {format_speaker_choices(speakers)}"
+    )
+
+
+def fetch_speaker_name(speaker_ip: str) -> str:
+    desc_url = f"http://{speaker_ip}:1400/xml/device_description.xml"
+    with urlopen(desc_url, timeout=4) as response:
+        xml = response.read().decode("utf-8", errors="ignore")
+    return parse_friendly_name(xml) or ""
+
+
+def recover_speaker_ip_from_discovery(*, preferred_ip: str, speaker_name: str, timeout_s: float) -> str | None:
+    speakers = discover_speakers(timeout_s=timeout_s)
+    if preferred_ip:
+        for speaker in speakers:
+            if speaker.get("ip", "").strip() == preferred_ip:
+                return preferred_ip
+
+    normalized_name = normalize_speaker_name(speaker_name)
+    if not normalized_name:
+        return None
+
+    matching_by_name = [speaker for speaker in speakers if normalize_speaker_name(speaker.get("name", "")) == normalized_name]
+    if len(matching_by_name) != 1:
+        return None
+
+    recovered_ip = matching_by_name[0].get("ip", "").strip()
+    if not recovered_ip:
+        return None
+
+    return recovered_ip
+
+
 def start_loopback_capture(audio_queue: AudioQueue, samplerate: int = 48000) -> threading.Thread:
     import sounddevice as sd
 
@@ -282,8 +369,27 @@ def run_discover(args: argparse.Namespace) -> int:
 
 
 def run_start(args: argparse.Namespace) -> int:
+    if args.speaker and args.speaker_ip:
+        raise RuntimeError("Use either --speaker or --speaker-ip for start, not both")
+
+    speaker_selector = (args.speaker or args.speaker_ip or "").strip()
+    if not speaker_selector:
+        raise RuntimeError("Provide --speaker or --speaker-ip for start")
+
+    resolved_speaker = resolve_speaker_selector(speaker_selector, timeout_s=args.discover_timeout)
+    speaker_ip = resolved_speaker.get("ip", "").strip()
+    if not speaker_ip:
+        raise RuntimeError(f"Could not resolve Sonos speaker from selector '{speaker_selector}'")
+
+    speaker_name = resolved_speaker.get("name", "").strip()
+    if not speaker_name:
+        try:
+            speaker_name = fetch_speaker_name(speaker_ip)
+        except Exception:
+            speaker_name = ""
+
     stream_path = normalize_stream_path(args.stream_path)
-    bind_ip = args.bind_ip or get_local_ip_for_target(args.speaker_ip)
+    bind_ip = args.bind_ip or get_local_ip_for_target(speaker_ip)
 
     audio_queue = AudioQueue()
     start_loopback_capture(audio_queue)
@@ -296,7 +402,7 @@ def run_start(args: argparse.Namespace) -> int:
     server_thread.start()
 
     stream_url = f"http://{bind_ip}:{args.port}{stream_path}"
-    endpoint = fetch_av_transport_endpoint(args.speaker_ip)
+    endpoint = fetch_av_transport_endpoint(speaker_ip)
     metadata = build_didl_metadata(stream_url, args.title)
 
     previous_uri = ""
@@ -331,7 +437,8 @@ def run_start(args: argparse.Namespace) -> int:
     write_state_file(
         args.state_file,
         {
-            "speaker_ip": args.speaker_ip,
+            "speaker_ip": speaker_ip,
+            "speaker_name": speaker_name,
             "endpoint": endpoint,
             "stream_url": stream_url,
             "stream_path": stream_path,
@@ -343,7 +450,8 @@ def run_start(args: argparse.Namespace) -> int:
         },
     )
 
-    print(f"Streaming Windows audio to Sonos speaker {args.speaker_ip} via {stream_url}")
+    speaker_label = speaker_name or speaker_ip
+    print(f"Streaming Windows audio to Sonos speaker {speaker_label} ({speaker_ip}) via {stream_url}")
 
     stop_event = threading.Event()
     install_signal_handlers(stop_event)
@@ -373,8 +481,19 @@ def run_start(args: argparse.Namespace) -> int:
 def run_stop(args: argparse.Namespace) -> int:
     state = read_state_file(args.state_file)
 
-    explicit_speaker_ip = (args.speaker_ip or "").strip()
+    if args.speaker and args.speaker_ip:
+        raise RuntimeError("Use either --speaker or --speaker-ip for stop, not both")
+
+    explicit_selector = (args.speaker or args.speaker_ip or "").strip()
+    explicit_speaker_ip = ""
+    explicit_speaker_name = ""
+    if explicit_selector:
+        explicit_speaker = resolve_speaker_selector(explicit_selector, timeout_s=args.discover_timeout)
+        explicit_speaker_ip = explicit_speaker.get("ip", "").strip()
+        explicit_speaker_name = explicit_speaker.get("name", "").strip()
+
     state_speaker_ip = ""
+    state_speaker_name = ""
     state_endpoint = ""
 
     if state:
@@ -382,11 +501,16 @@ def run_stop(args: argparse.Namespace) -> int:
         if isinstance(state_speaker_ip_value, str):
             state_speaker_ip = state_speaker_ip_value.strip()
 
+        state_speaker_name_value = state.get("speaker_name")
+        if isinstance(state_speaker_name_value, str):
+            state_speaker_name = state_speaker_name_value.strip()
+
         state_endpoint_value = state.get("endpoint")
         if isinstance(state_endpoint_value, str):
             state_endpoint = state_endpoint_value.strip()
 
     speaker_ip = explicit_speaker_ip or state_speaker_ip
+    speaker_name = explicit_speaker_name or state_speaker_name
 
     endpoint = ""
     if explicit_speaker_ip:
@@ -397,7 +521,7 @@ def run_stop(args: argparse.Namespace) -> int:
         endpoint = fetch_av_transport_endpoint(speaker_ip)
 
     if not speaker_ip and not endpoint:
-        raise RuntimeError("No running redirect state found. Provide --speaker-ip to force stop.")
+        raise RuntimeError("No running redirect state found. Provide --speaker or --speaker-ip to force stop.")
 
     previous_uri = ""
     previous_uri_metadata = ""
@@ -419,23 +543,44 @@ def run_stop(args: argparse.Namespace) -> int:
             retries=args.soap_retries,
             retry_delay_s=args.soap_retry_delay,
         )
-    except Exception:
-        can_retry_with_discovery = bool(speaker_ip) and not explicit_speaker_ip and bool(state_endpoint)
+    except Exception as stop_error:
+        can_retry_with_discovery = bool(state_endpoint) and not explicit_selector
         if not can_retry_with_discovery:
             raise
 
-        refreshed_endpoint = fetch_av_transport_endpoint(speaker_ip)
-        if refreshed_endpoint != endpoint:
-            endpoint = refreshed_endpoint
+        retry_speaker_ips: list[str] = []
+        if speaker_ip:
+            retry_speaker_ips.append(speaker_ip)
 
-        send_soap(
-            endpoint,
-            "Stop",
-            build_stop_envelope(),
-            timeout_s=args.soap_timeout,
-            retries=args.soap_retries,
-            retry_delay_s=args.soap_retry_delay,
+        recovered_speaker_ip = recover_speaker_ip_from_discovery(
+            preferred_ip=speaker_ip,
+            speaker_name=speaker_name,
+            timeout_s=args.discover_timeout,
         )
+        if recovered_speaker_ip and recovered_speaker_ip not in retry_speaker_ips:
+            retry_speaker_ips.append(recovered_speaker_ip)
+
+        retry_success = False
+        for retry_speaker_ip in retry_speaker_ips:
+            try:
+                refreshed_endpoint = fetch_av_transport_endpoint(retry_speaker_ip)
+                send_soap(
+                    refreshed_endpoint,
+                    "Stop",
+                    build_stop_envelope(),
+                    timeout_s=args.soap_timeout,
+                    retries=args.soap_retries,
+                    retry_delay_s=args.soap_retry_delay,
+                )
+                endpoint = refreshed_endpoint
+                speaker_ip = retry_speaker_ip
+                retry_success = True
+                break
+            except Exception:
+                continue
+
+        if not retry_success:
+            raise stop_error
 
     restored_previous_source = False
     restore_error: Exception | None = None
@@ -477,7 +622,13 @@ def build_parser() -> argparse.ArgumentParser:
     discover.set_defaults(func=run_discover)
 
     start = subparsers.add_parser("start", help="Start redirecting Windows output audio to a Sonos speaker")
-    start.add_argument("--speaker-ip", required=True, help="Sonos speaker IP on local network")
+    start.add_argument("--speaker-ip", default=None, help="Sonos speaker IP on local network")
+    start.add_argument(
+        "--speaker",
+        default=None,
+        help="Speaker selector (friendly name or IP) resolved from local-network discovery",
+    )
+    start.add_argument("--discover-timeout", type=float, default=1.5, help="Discovery timeout in seconds for speaker selector")
     start.add_argument("--bind-ip", default=None, help="Local LAN IP that Sonos can reach")
     start.add_argument("--port", type=int, default=8090, help="HTTP stream port")
     start.add_argument("--stream-path", default="/stream", help="HTTP stream path")
@@ -495,6 +646,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop = subparsers.add_parser("stop", help="Send stop command to the active Sonos stream")
     stop.add_argument("--speaker-ip", default=None, help="Speaker IP (optional when state file exists)")
+    stop.add_argument(
+        "--speaker",
+        default=None,
+        help="Speaker selector (friendly name or IP) resolved from local-network discovery",
+    )
+    stop.add_argument("--discover-timeout", type=float, default=1.5, help="Discovery timeout in seconds for speaker selector")
     stop.add_argument("--soap-timeout", type=float, default=6.0, help="Sonos SOAP HTTP timeout in seconds")
     stop.add_argument("--soap-retries", type=int, default=2, help="Retry count for transient Sonos SOAP failures")
     stop.add_argument(

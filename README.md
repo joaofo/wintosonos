@@ -48,7 +48,7 @@ WinToSonos creates a local virtual environment on first redirect start and insta
 You can also run directly:
 
 ```powershell
-# Start redirect
+# Start redirect (explicit IP)
 .\scripts\start-audio-redirect.ps1 -SpeakerIp 192.168.1.50
 
 # Stop redirect
@@ -56,6 +56,17 @@ You can also run directly:
 
 # Discover Sonos speakers (JSON)
 .\scripts\list-sonos-speakers.ps1
+```
+
+Backend CLI also supports speaker-friendly selection (resolved from discovery):
+
+```powershell
+# Start by friendly speaker name
+$env:PYTHONPATH = '.\backend'
+python -m sonos_redirector.redirector start --speaker "Living Room"
+
+# Stop by friendly speaker name (or by --speaker-ip)
+python -m sonos_redirector.redirector stop --speaker "Living Room"
 ```
 
 ## Installer examples
