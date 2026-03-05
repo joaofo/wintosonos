@@ -520,8 +520,6 @@ def run_start(args: argparse.Namespace) -> int:
 
 
 def run_stop(args: argparse.Namespace) -> int:
-    state = read_state_file(args.state_file)
-
     if args.speaker and args.speaker_ip:
         raise RuntimeError("Use either --speaker or --speaker-ip for stop, not both")
 
@@ -532,6 +530,17 @@ def run_stop(args: argparse.Namespace) -> int:
         explicit_speaker = resolve_speaker_selector(explicit_selector, timeout_s=args.discover_timeout)
         explicit_speaker_ip = explicit_speaker.get("ip", "").strip()
         explicit_speaker_name = explicit_speaker.get("name", "").strip()
+
+    state: dict[str, str | int] | None = None
+    state_read_error: Exception | None = None
+    try:
+        state = read_state_file(args.state_file)
+        if state is not None and not isinstance(state, dict):
+            raise ValueError("redirect state JSON root must be an object")
+    except (OSError, ValueError) as exc:
+        state_read_error = exc
+        if explicit_selector:
+            print(f"Warning: unable to read redirect state file '{args.state_file}': {exc}")
 
     state_speaker_ip = ""
     state_speaker_name = ""
@@ -567,6 +576,11 @@ def run_stop(args: argparse.Namespace) -> int:
         endpoint = fetch_av_transport_endpoint(speaker_ip)
 
     if not speaker_ip and not endpoint:
+        if state_read_error is not None:
+            raise RuntimeError(
+                f"Redirect state file '{args.state_file}' is unreadable ({state_read_error}). "
+                "Provide --speaker or --speaker-ip to force stop."
+            ) from state_read_error
         raise RuntimeError("No running redirect state found. Provide --speaker or --speaker-ip to force stop.")
 
     previous_uri = ""

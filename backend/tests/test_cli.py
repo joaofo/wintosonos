@@ -79,6 +79,68 @@ def test_run_stop_rejects_conflicting_speaker_arguments() -> None:
         assert "either --speaker or --speaker-ip" in str(exc)
 
 
+def test_run_stop_with_invalid_state_file_and_explicit_speaker_ip_still_stops() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        state_file = f"{temp_dir}/redirect-state.json"
+        with open(state_file, "w", encoding="utf-8") as f:
+            f.write('{"speaker_ip":')
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "stop",
+                "--state-file",
+                state_file,
+                "--speaker-ip",
+                "192.168.1.99",
+                "--no-restore-previous-source",
+            ]
+        )
+
+        fetch_calls = []
+        soap_calls = []
+        original_fetch_av_transport_endpoint = redirector.fetch_av_transport_endpoint
+        original_send_soap = redirector.send_soap
+
+        def fake_fetch_av_transport_endpoint(speaker_ip):
+            fetch_calls.append(speaker_ip)
+            return f"http://{speaker_ip}:1400/MediaRenderer/AVTransport/Control"
+
+        def fake_send_soap(endpoint, action, payload, **kwargs):
+            soap_calls.append((endpoint, action, payload, kwargs))
+            return None
+
+        redirector.fetch_av_transport_endpoint = fake_fetch_av_transport_endpoint
+        redirector.send_soap = fake_send_soap
+        try:
+            exit_code = redirector.run_stop(args)
+        finally:
+            redirector.fetch_av_transport_endpoint = original_fetch_av_transport_endpoint
+            redirector.send_soap = original_send_soap
+
+        assert exit_code == 0
+        assert fetch_calls == ["192.168.1.99"]
+        assert [call[1] for call in soap_calls] == ["Stop"]
+        assert not redirector.Path(state_file).exists()
+
+
+def test_run_stop_with_invalid_state_file_requires_explicit_selector() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        state_file = f"{temp_dir}/redirect-state.json"
+        with open(state_file, "w", encoding="utf-8") as f:
+            f.write('{"speaker_ip":')
+
+        parser = build_parser()
+        args = parser.parse_args(["stop", "--state-file", state_file])
+
+        try:
+            redirector.run_stop(args)
+            assert False, "Expected RuntimeError"
+        except RuntimeError as exc:
+            assert "unreadable" in str(exc)
+            assert "--speaker or --speaker-ip" in str(exc)
+
+
 def test_resolve_speaker_selector_accepts_ip_without_discovery() -> None:
     calls = {"count": 0}
     original_discover_speakers = redirector.discover_speakers
